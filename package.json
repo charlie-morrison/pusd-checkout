@@ -1,0 +1,23 @@
+{
+  "name": "pusd-checkout",
+  "private": true,
+  "type": "module",
+  "description": "USD-priced checkout on Bitcoin Cash: the buyer pays BCH, the merchant receives PUSD in the same transaction (BCH BLAZE 2026 entry).",
+  "license": "MIT",
+  "scripts": {
+    "spike:build": "vite build prep/browser-spike --target esnext --base ./"
+  },
+  "dependencies": {
+    "@bitauth/libauth": "3.1.0-next.8",
+    "@mr-zwets/cauldron-swap-sdk": "0.2.0",
+    "@wizardconnect/core": "0.2.5",
+    "@wizardconnect/dapp": "0.2.2",
+    "@wizardconnect/wallet": "0.2.3",
+    "bip39": "^3.0.4",
+    "bitauth-libauth-v3": "npm:@bitauth/libauth@3.1.0-next.8",
+    "cashscript": "0.14.0"
+  },
+  "devDependencies": {
+    "vite": "6.4.5"
+  }
+}
