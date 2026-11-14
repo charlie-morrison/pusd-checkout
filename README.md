@@ -67,7 +67,13 @@ All keys in these scripts are generated per run and thrown away. Nothing here ho
   [web.archive.org snapshot](https://web.archive.org/web/20261114111613/https://charliemorrison.dev/pusd-checkout/)
   and the code at tag [`v0-2026-11-14`](https://github.com/charlie-morrison/pusd-checkout/tree/v0-2026-11-14).
 - 14.11: page skeleton with the prize address in the header, the mainnet/chipnet switch, and live Cauldron pool data
-  for the merchant's token (PUSD on mainnet, a test token on chipnet). No wallet connection or payment yet.
+  for the merchant's token (PUSD on mainnet, a test token on chipnet).
+- 14.11, later: WizardConnect wallet connection (paste the link into Cashonize or Paytaca). The page counts the wallet
+  as connected only after the encrypted key exchange completes, because a wallet with the wrong pairing secret still
+  sends its "ready" message. Disconnect tells the wallet before closing. No payment yet.
+  `test/wc_connect_e2e.py` checks it over the live relay with a throwaway wallet built on the official
+  `@wizardconnect/wallet` library: the right wallet connects and the page shows exactly its first receive address;
+  a wallet with a wrong secret stays unconnected. A build that trusts the "ready" message alone fails that test.
 
 Build: Node 24, `npm ci --ignore-scripts`, `npm run build` (output in `dist/`), `npm run dev` for a local server.
 
