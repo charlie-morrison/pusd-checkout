@@ -16,7 +16,7 @@ The organizers allow preparation done before the hackathon as a base, and judge 
 14.11 to 22.11. This first commit (tag `v0-2026-11-14`) is that base: throwaway scripts that checked the
 idea could work at all. There is no checkout page yet. Everything after the tag is the hackathon work.
 
-What the scripts showed (measured 04.11 to 06.11.2026):
+What the scripts showed (measured 04.11 to 12.11.2026):
 
 - `prep/liquidity/measure.py`: PUSD pools on Cauldron hold enough liquidity for $1 to $20 payments at a
   small overpay versus $1 per PUSD. Needs a pool dump from the Cauldron indexer and a BCH/USD price.
@@ -58,6 +58,18 @@ What the scripts showed (measured 04.11 to 06.11.2026):
   of expecting both nodes to name the same one. Python 3 with `web3`.
 
 All keys in these scripts are generated per run and thrown away. Nothing here holds funds.
+
+## After the tag (hackathon work, from 14.11)
+
+- Live page: https://charliemorrison.dev/pusd-checkout/ (built from `main` by GitHub Actions). Add `?net=chipnet`
+  to use chipnet test coins; every other query parameter stays when you switch networks.
+- The page as it was on 14.11 (the README above, before any UI):
+  [web.archive.org snapshot](https://web.archive.org/web/20261114111613/https://charliemorrison.dev/pusd-checkout/)
+  and the code at tag [`v0-2026-11-14`](https://github.com/charlie-morrison/pusd-checkout/tree/v0-2026-11-14).
+- 14.11: page skeleton with the prize address in the header, the mainnet/chipnet switch, and live Cauldron pool data
+  for the merchant's token (PUSD on mainnet, a test token on chipnet). No wallet connection or payment yet.
+
+Build: Node 24, `npm ci --ignore-scripts`, `npm run build` (output in `dist/`), `npm run dev` for a local server.
 
 ## Running the scripts
 

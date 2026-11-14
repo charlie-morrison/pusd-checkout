@@ -5,6 +5,9 @@
   "description": "USD-priced checkout on Bitcoin Cash: the buyer pays BCH, the merchant receives PUSD in the same transaction (BCH BLAZE 2026 entry).",
   "license": "MIT",
   "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
     "spike:build": "vite build prep/browser-spike --target esnext --base ./"
   },
   "dependencies": {
