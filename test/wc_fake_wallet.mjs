@@ -1,7 +1,9 @@
 // Throwaway WizardConnect wallet for testing the page's connect flow (official @wizardconnect/wallet lib).
-// Usage: node test/wc_fake_wallet.mjs <wiz:// uri> [--tamper-secret] [--seconds N]
+// Usage: node test/wc_fake_wallet.mjs <wiz:// uri, plain or QR form> [--tamper-secret] [--seconds N] [--seed-from-env]
 // Prints JSON lines: the address the page should show for receive/0, then wallet-side events.
-// The seed is random per run and never stored; nothing here holds funds.
+// The seed is random per run and never stored, so that wallet holds nothing. --seed-from-env uses the
+// hex seed in WC_TEST_SEED_HEX instead (a chipnet test wallet with worthless coins, for the coin scan
+// test); the seed is never printed.
 import { createHash, randomBytes } from 'node:crypto';
 import * as core from '@wizardconnect/core';
 import { WalletConnectionManager } from '@wizardconnect/wallet';
@@ -19,7 +21,11 @@ process.on('uncaughtException', (e) => {
   out({ fatal: String(e).slice(0, 200) }); process.exit(3);
 });
 
-const seed = randomBytes(32);
+const fromEnv = args.includes('--seed-from-env');
+if (fromEnv && !/^[0-9a-f]{32,128}$/i.test(process.env.WC_TEST_SEED_HEX ?? '')) {
+  out({ fatal: 'WC_TEST_SEED_HEX missing or not hex' }); process.exit(3);
+}
+const seed = fromEnv ? la.hexToBin(process.env.WC_TEST_SEED_HEX) : randomBytes(32);
 const root = la.deriveHdPrivateNodeFromSeed(seed);
 const PATHS = { 0: "m/44'/145'/0'/0", 1: "m/44'/145'/0'/1", 7: "m/44'/145'/0'/7" };
 const chainNode = (c) => { const n = la.deriveHdPath(root, PATHS[c]); if (typeof n === 'string') throw new Error(n); return n; };
@@ -28,7 +34,7 @@ const pubOf = (k) => la.secp256k1.derivePublicKeyCompressed(k);
 
 const pub0 = pubOf(childPriv(0, 0));
 const addr = (prefix) => la.encodeCashAddress({ prefix, type: 'p2pkh', payload: la.hash160(pub0) }).address;
-out({ expected: { mainnet: addr('bitcoincash'), chipnet: addr('bchtest') }, tamper });
+out({ expected: { mainnet: addr('bitcoincash'), chipnet: addr('bchtest') }, tamper, seeded: fromEnv });
 
 if (tamper) {
   const dec = core.decodeKeyExchangeURI(uri);

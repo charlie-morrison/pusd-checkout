@@ -2,6 +2,9 @@ import './style.css';
 import { netFromUrl, urlForNet, NETWORKS, PRIZE_ADDRESS, type NetName } from './config';
 import { fetchPools, summarize, formatUnits } from './pools';
 import { WalletLink, type LinkState } from './wallet';
+import { qrSvg } from './qr';
+import { scanWallet, GAP_LIMIT, type ScanResult } from './utxos';
+import { withElectrum } from './chain';
 
 const net = netFromUrl(location.search);
 
@@ -59,7 +62,8 @@ function renderWallet(root: HTMLElement) {
   box.append(body);
   root.append(box);
 
-  const link = new WalletLink(net.name === 'chipnet' ? 'bchtest' : 'bitcoincash', (s) => draw(s));
+  const prefix = net.name === 'chipnet' ? 'bchtest' : 'bitcoincash';
+  const link = new WalletLink(prefix, (s) => draw(s));
 
   function draw(s: LinkState) {
     box.dataset.state = s.kind;
@@ -72,6 +76,10 @@ function renderWallet(root: HTMLElement) {
       b.addEventListener('click', () => link.start());
       body.append(b);
     } else if (s.kind === 'waiting') {
+      body.append(el('p', {}, 'Scan with a phone wallet, or paste the link below into a desktop wallet.'));
+      const qrBox = el('figure', { class: 'qrbox', id: 'wc-qr', 'data-qr': s.qrUri });
+      qrBox.append(qrSvg(s.qrUri, 'WizardConnect QR code'));
+      body.append(qrBox);
       body.append(el('p', {}, 'Paste this link into your wallet (Cashonize: Connect; Paytaca: WizardConnect → Paste URL):'));
       const row = el('div', { class: 'urirow' });
       const input = el('input', { type: 'text', readonly: '', id: 'wc-uri', value: s.uri, 'aria-label': 'WizardConnect link' });
@@ -93,11 +101,66 @@ function renderWallet(root: HTMLElement) {
       addr.append(el('code', {}, s.firstAddress));
       dl.append(el('dt', {}, 'First receive address'), addr);
       body.append(el('p', { class: 'ok' }, 'Connected.'), dl);
+      const coins = el('div', { id: 'coins', 'data-state': 'scanning' });
+      body.append(coins);
       const d = el('button', { type: 'button', id: 'disconnect', class: 'secondary' }, 'Disconnect');
       d.addEventListener('click', () => link.stop());
       body.append(d);
+      void scanCoins(coins);
     }
   }
+  // Build rule 8: read every address the wallet may have used, not just receive/0.
+  let scanRun = 0;
+  async function scanCoins(box: HTMLElement) {
+    const run = ++scanRun;
+    box.dataset.state = 'scanning';
+    box.replaceChildren(el('p', { class: 'muted small' },
+      `Looking for your coins on the wallet's receive and change addresses (stops after ${GAP_LIMIT} unused in a row)…`));
+    try {
+      const r = await withElectrum(net.name, (reader) => scanWallet(link.pubkeyAt, prefix, reader));
+      if (run !== scanRun || link.state.kind !== 'connected') return;
+      drawCoins(box, r);
+    } catch (e) {
+      if (run !== scanRun) return;
+      box.dataset.state = 'error';
+      box.replaceChildren(el('p', { class: 'error' }, `Could not read your coins: ${String(e).slice(0, 200)}`));
+      const again = el('button', { type: 'button', class: 'secondary' }, 'Try again');
+      again.addEventListener('click', () => void scanCoins(box));
+      box.append(again);
+    }
+  }
+
+  function drawCoins(box: HTMLElement, r: ScanResult) {
+    box.dataset.state = 'done';
+    box.dataset.sats = String(r.spendableSats);
+    box.dataset.coins = String(r.spendable.length);
+    box.replaceChildren();
+    const used = new Set(r.spendable.map((u) => `${u.chain}/${u.index}`));
+    const head = el('p', { id: 'coins-total' });
+    head.append(el('strong', {}, `${formatUnits(r.spendableSats, 8)} BCH`),
+      ` spendable in ${r.spendable.length} coin${r.spendable.length === 1 ? '' : 's'} on ${used.size} address${used.size === 1 ? '' : 'es'}.`);
+    box.append(head);
+    const sum = (c: 'receive' | 'change') => {
+      const x = r.chains[c];
+      return x.stopped === 'no-xpub' ? `${c}: not shared by the wallet`
+        : `${c} 0–${x.checked - 1} (last used ${x.lastUsed < 0 ? 'none' : x.lastUsed})`;
+    };
+    box.append(el('p', { class: 'muted small' }, `Checked ${sum('receive')}; ${sum('change')}.` +
+      (r.tokenUtxos ? ` ${r.tokenUtxos} token coin${r.tokenUtxos === 1 ? '' : 's'} left alone (spending them as BCH would burn the tokens).` : '')));
+    if (r.spendable.length) {
+      const ul = el('ul', { class: 'small', id: 'coins-list' });
+      for (const u of r.spendable) {
+        const li = el('li');
+        li.append(el('code', {}, `${u.chain}/${u.index}`), ` ${formatUnits(u.satoshis, 8)} BCH`);
+        ul.append(li);
+      }
+      box.append(ul);
+    }
+    const again = el('button', { type: 'button', class: 'secondary', id: 'rescan' }, 'Rescan');
+    again.addEventListener('click', () => void scanCoins(box));
+    box.append(again);
+  }
+
   draw(link.state);
   addEventListener('pagehide', () => link.stop(false));
 }

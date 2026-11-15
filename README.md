@@ -74,6 +74,18 @@ All keys in these scripts are generated per run and thrown away. Nothing here ho
   `test/wc_connect_e2e.py` checks it over the live relay with a throwaway wallet built on the official
   `@wizardconnect/wallet` library: the right wallet connects and the page shows exactly its first receive address;
   a wallet with a wrong secret stays unconnected. A build that trusts the "ready" message alone fails that test.
+- 15.11: a QR code of the connection link for phone wallets. It uses the link's upper-case form, which fits the
+  compact alphanumeric QR mode. After connecting, the page finds the buyer's coins on every address the wallet may
+  have used, not only the first one. HD wallets such as Paytaca move to a new receive address after each payment
+  and keep change on a second chain. The page walks both chains from the keys the wallet shared and stops after 20
+  unused addresses in a row. An address that was paid and later emptied still counts as used, so the walk does not
+  stop early. Coins that carry tokens are listed but never spent as plain BCH, because that would burn the tokens.
+  - `test/scan_unit.mjs` checks the walk against a fake chain in 7 cases. Four broken copies fail it: one that
+    reads only the first address, one that counts the gap wrong, one that spends token coins, and one that treats
+    an emptied address as unused.
+  - `test/wc_scan_e2e.py` runs against live chipnet. It decodes the QR from the page, and a test wallet connects
+    with the decoded text, the way a phone would. The wallet has coins on receive/3 and change/2 and none on the
+    first address, and the page has to find exactly those two. A fresh wallet has to show 0.
 
 Build: Node 24, `npm ci --ignore-scripts`, `npm run build` (output in `dist/`), `npm run dev` for a local server.
 

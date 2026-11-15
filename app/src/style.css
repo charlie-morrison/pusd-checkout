@@ -37,3 +37,7 @@ button.secondary { background: transparent; color: var(--fg); border-color: var(
 .urirow input { flex: 1; min-width: 0; font: 0.85rem ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg); }
 .ok { color: var(--accent); font-weight: 600; margin: 0 0 6px; }
 dd code { overflow-wrap: anywhere; }
+.qrbox { margin: 8px 0 12px; }
+.qr { width: min(240px, 70vw); height: auto; display: block; border-radius: 6px; }
+#coins { margin: 8px 0; }
+#coins ul { margin: 4px 0 0; padding-left: 18px; }

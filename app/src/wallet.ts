@@ -81,4 +81,12 @@ export class WalletLink {
   }
 
   get manager() { return this.dm; }
+
+  // Derives the wallet's public key at chain `child` (0 receive, 1 change), address `index`, from the
+  // xpub it shared. Undefined before the wallet is ready or for a chain it did not share.
+  pubkeyAt = (child: number, index: bigint): Uint8Array | undefined => {
+    const dm = this.dm;
+    if (!dm || this.state.kind !== 'connected' || !dm.hasPath(child)) return undefined;
+    return dm.getPubkey(child, index);
+  };
 }
