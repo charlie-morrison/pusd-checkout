@@ -41,3 +41,10 @@ dd code { overflow-wrap: anywhere; }
 .qr { width: min(240px, 70vw); height: auto; display: block; border-radius: 6px; }
 #coins { margin: 8px 0; }
 #coins ul { margin: 4px 0 0; padding-left: 18px; }
+#gen-form { display: grid; gap: 6px; margin: 8px 0; }
+#gen-form label { color: var(--muted); font-size: 0.9rem; }
+#gen-form input { font: inherit; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg); min-width: 0; }
+#gen-form button { justify-self: start; margin-top: 6px; }
+.card.pay h2 { font-size: 1.4rem; }
+#pay-total { font-size: 1.15rem; margin: 6px 0; }
+#pay-to { overflow-wrap: anywhere; }

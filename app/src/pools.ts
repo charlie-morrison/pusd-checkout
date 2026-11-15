@@ -7,6 +7,9 @@ export interface Pool {
   sats: number;
   tokens: number;
   token_id: string;
+  // The pool owner's key hash builds the pool contract (needed to spend it; read-only until 17.11).
+  owner_pkh?: string;
+  owner_p2pkh_addr?: string;
 }
 
 export interface PoolSummary {

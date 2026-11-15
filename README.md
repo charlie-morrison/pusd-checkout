@@ -86,6 +86,18 @@ All keys in these scripts are generated per run and thrown away. Nothing here ho
   - `test/wc_scan_e2e.py` runs against live chipnet. It decodes the QR from the page, and a test wallet connects
     with the decoded text, the way a phone would. The wallet has coins on receive/3 and change/2 and none on the
     first address, and the page has to find exactly those two. A fresh wallet has to show 0.
+- 15.11, later: merchant payment links. Without parameters the page offers a form: the merchant enters a
+  token-aware address of the network, an amount and an optional memo, and gets a link and a QR code. A link
+  (`?to=<address>&usd=12.50&memo=…`) opens a payment card with a live quote: the cheapest single Cauldron pool that
+  can deliver exactly that amount, the 0.3% pool fee, and an estimated network fee. It refreshes every 30 seconds.
+  Once a wallet is connected, the card says whether the wallet holds enough. Addresses that cannot receive tokens,
+  addresses of the other network, and malformed amounts are rejected. Paying itself is not live yet.
+  - `test/quote_unit.mjs`: 16 cases. The quote must equal the Cauldron SDK's own optimiser limited to one pool,
+    checked against live mainnet pools. Four broken copies fail it: one picks the priciest pool, one accepts any
+    address type, one skips the network check, one lets a pool sell its last token.
+  - `test/pay_e2e.py`: the generator's link carries every field and keeps the network. The page's total matches an
+    independent quote. The test wallet reads "enough" for 40 TEST and "short" for 900 TEST. A link to a non-token
+    address is refused, and a mainnet link for 12.50 PUSD is quoted.
 
 Build: Node 24, `npm ci --ignore-scripts`, `npm run build` (output in `dist/`), `npm run dev` for a local server.
 
