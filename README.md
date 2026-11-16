@@ -98,6 +98,33 @@ All keys in these scripts are generated per run and thrown away. Nothing here ho
   - `test/pay_e2e.py`: the generator's link carries every field and keeps the network. The page's total matches an
     independent quote. The test wallet reads "enough" for 40 TEST and "short" for 900 TEST. A link to a non-token
     address is refused, and a mainnet link for 12.50 PUSD is quoted.
+- 16.11: the bridge quote (for the Stablecoin Bridge bounty). On mainnet the page quotes both directions between
+  PUSD and a dollar stablecoin on another chain, through THORChain: USDT on BNB Smart Chain or USDC on Base.
+  - Out: a Cauldron pool buys your PUSD, the BCH goes to a THORChain vault with a memo, and THORChain pays the
+    stablecoin to your 0x address. You need no wallet on the other chain. These are two BCH transactions, because
+    THORChain's own instructions forbid sending from a covenant script such as a Cauldron pool.
+  - In: you deposit the stablecoin through THORChain's router, THORChain sends BCH to your address, and a Cauldron
+    pool sells you PUSD. The page takes either address form; THORChain gets the plain one without the
+    `bitcoincash:` prefix, which it cannot parse, and the PUSD goes to the token-aware form of the same key.
+  - The page shows each fee on its own line, THORChain's minimum, the time estimate and a countdown to the quote's
+    expiry. It never promises a rate.
+  - Before quoting, it reads THORChain's status and says which chains are closed. On 16.11 THORChain had halted
+    Base, so the page offered only BSC; a quote for a closed chain is never requested.
+  - It accepts a THORChain quote only if the memo pays the asset and address you entered, the vault is one of
+    THORChain's active vaults (it runs six for BCH, and quotes name different ones), the router is active, the
+    quote lives at least another minute, and the amount clears THORChain's minimum.
+  - Sending is not live yet.
+  - Re-quote before signing (`freshQuote`, for the signing step that comes next): the payment is rebuilt on the
+    pools as they are at that moment, because every trade replaces a pool's coin. If the price rose by more than
+    0.5% since the buyer saw it, the buyer has to see the new price first.
+  - `test/thor_unit.mjs`: 43 cases on THORChain answers saved on 16.11 and on altered copies of them (memo to
+    another address or asset, inactive vault or router, expiring quote, fees in another asset, a memo too long for
+    an OP_RETURN). Eight broken copies fail it, each on its own case: one ignores a halted chain, and the others
+    skip the destination, vault, expiry, price or router check, keep the address prefix, or buy one token too many.
+  - `test/bridge_e2e.py` runs against live THORChain and Cauldron. The page's status line must match THORChain.
+    Both directions must produce a memo that pays the entered address, and an output equal to an independent
+    THORChain quote within 1%. A closed chain must show its reason, bad addresses must be refused, and chipnet must
+    say that the bridge runs on mainnet only.
 
 Build: Node 24, `npm ci --ignore-scripts`, `npm run build` (output in `dist/`), `npm run dev` for a local server.
 

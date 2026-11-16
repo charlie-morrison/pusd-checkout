@@ -6,6 +6,8 @@ import { qrSvg } from './qr';
 import { scanWallet, GAP_LIMIT, type ScanResult } from './utxos';
 import { withElectrum } from './chain';
 import { parsePayRequest, bestQuote, payLink, checkMerchantAddress, parseAmount, MEMO_MAX, type PayRequest } from './quote';
+import { STABLES, readThorState, chainStatus, thorUnits, formatThor, type ThorState, type QuoteResult } from './thor';
+import { quoteOut, quoteIn, bchDestination, evmDestination } from './bridge';
 
 const net = netFromUrl(location.search);
 const prefix = net.name === 'chipnet' ? 'bchtest' : 'bitcoincash';
@@ -285,6 +287,171 @@ function renderGenerator(root: HTMLElement, linkError: string | null) {
   });
 }
 
+const BRIDGE_MAX_USD = 1000;
+
+// Stablecoin Bridge bounty: PUSD on BCH <-> USDT on BSC / USDC on Base through THORChain. Quote only here.
+function renderBridge(root: HTMLElement) {
+  const box = el('section', { class: 'card', id: 'bridge', 'data-state': 'idle' });
+  box.append(el('h2', {}, 'Bridge: PUSD ⇄ USDT / USDC'));
+  root.append(box);
+  if (net.testCoins) {
+    box.dataset.state = 'mainnet-only';
+    const p = el('p', { class: 'muted' }, 'The bridge runs on mainnet only: THORChain has no Bitcoin Cash test network. ');
+    p.append(el('a', { href: urlForNet(location.href, 'mainnet') }, 'Open it on mainnet'));
+    box.append(p);
+    return;
+  }
+  box.append(el('p', { class: 'small' },
+    'Move dollars between Bitcoin Cash and another chain. Out: your PUSD is sold on a Cauldron pool and the BCH goes to ' +
+    'THORChain, which pays USDT or USDC to your address on the other chain. In: the reverse, ending as PUSD in your BCH wallet. ' +
+    'This build shows the live quote for both directions; sending is not live yet.'));
+  const status = el('p', { class: 'small muted', id: 'thor-status' }, 'Reading THORChain status…');
+  box.append(status);
+
+  const form = el('form', { id: 'bridge-form' });
+  const dir = el('fieldset', { class: 'dir' });
+  dir.append(el('legend', {}, 'Direction'));
+  const radio = (value: string, label: string, checked: boolean) => {
+    const l = el('label');
+    const r = el('input', { type: 'radio', name: 'dir', value, id: `dir-${value}` });
+    (r as HTMLInputElement).checked = checked;
+    l.append(r, ` ${label}`);
+    dir.append(l);
+    return r as HTMLInputElement;
+  };
+  const rOut = radio('out', 'PUSD → other chain', true);
+  radio('in', 'Other chain → PUSD', false);
+  form.append(dir);
+  form.append(el('label', { for: 'br-chain' }, 'Other chain'));
+  const sel = el('select', { id: 'br-chain', name: 'br-chain' }) as HTMLSelectElement;
+  for (const st of STABLES) sel.append(el('option', { value: st.chain }, st.label));
+  form.append(sel);
+  form.append(el('label', { for: 'br-usd' }, 'Amount (USD)'));
+  const amt = el('input', { id: 'br-usd', type: 'text', inputmode: 'decimal', value: '5' }) as HTMLInputElement;
+  form.append(amt);
+  const destLabel = el('label', { for: 'br-dest' });
+  const dest = el('input', { id: 'br-dest', type: 'text', autocomplete: 'off', spellcheck: 'false' }) as HTMLInputElement;
+  form.append(destLabel, dest);
+  const go = el('button', { type: 'submit', id: 'br-go' }, 'Get quote');
+  form.append(go);
+  const out = el('div', { id: 'bridge-quote' });
+  box.append(form, out);
+
+  const syncDir = () => {
+    destLabel.textContent = rOut.checked ? 'Your address on the other chain (0x…)' : 'Your Bitcoin Cash address (the PUSD lands here)';
+    dest.placeholder = rOut.checked ? '0x…' : 'bitcoincash:z… or q…';
+  };
+  form.addEventListener('change', syncDir);
+  syncDir();
+
+  let state: ThorState | null = null;
+  const drawStatus = () => {
+    if (!state) return;
+    const parts = ['BCH', ...STABLES.map((x) => x.chain)].map((c) => {
+      const s = chainStatus(state!.inbound, c);
+      return `${c} ${s.open ? 'open' : 'closed'}`;
+    });
+    status.textContent = `THORChain right now: ${parts.join(' · ')} (read ${new Date(state.readAt * 1000).toISOString().slice(11, 16)} UTC).`;
+    for (const opt of Array.from(sel.options)) {
+      const st = STABLES.find((x) => x.chain === opt.value)!;
+      const s = chainStatus(state.inbound, st.chain);
+      opt.textContent = s.open ? st.label : `${st.label} (closed: ${(s.reason ?? "").replace(/\.$/, "")})`;
+    }
+    box.dataset.thor = parts.join(',');
+  };
+  const loadState = async () => {
+    try { state = await readThorState(); drawStatus(); }
+    catch (e) { status.textContent = `Could not read THORChain status: ${String(e).slice(0, 160)}`; status.className = 'small error'; }
+  };
+
+  let timer: number | undefined;
+  let run = 0;
+  const thorError = (r: QuoteResult) => (r.ok ? '' : r.error);
+  async function quote() {
+    const mine = ++run;
+    out.replaceChildren(el('p', { class: 'muted small' }, 'Quoting…'));
+    box.dataset.state = 'quoting';
+    const st = STABLES.find((x) => x.chain === sel.value)!;
+    const units1e8 = thorUnits(amt.value.trim());
+    const pusd = parseAmount(amt.value.trim(), net.token.decimals);
+    const fail = (msg: string, kind = 'error') => { if (mine !== run) return; box.dataset.state = kind; out.replaceChildren(el('p', { class: 'error' }, msg)); };
+    if (units1e8 === null || typeof pusd === 'string') return fail('Enter an amount in dollars, at most 2 decimals.');
+    if (units1e8 > BigInt(BRIDGE_MAX_USD) * 100000000n) return fail(`The amount is above the demo limit of ${BRIDGE_MAX_USD}.`);
+    try {
+      await loadState();
+      if (!state) return fail('THORChain status is unknown, so no quote.');
+      const pools = await fetchPools(net.indexer, net.token.category);
+      const dl = el('dl', { class: 'small' });
+      const row = (k: string, v: string, id?: string) => dl.append(el('dt', {}, k), el('dd', id ? { id } : {}, v));
+      const head = el('p', { id: 'bridge-total' });
+      let thorQ: QuoteResult;
+      if (rOut.checked) {
+        const to = evmDestination(dest.value);
+        if (!to) return fail('Enter your 0x address on the other chain (40 hex characters).');
+        const r = await quoteOut(pools, pusd, st, to, state);
+        if (mine !== run) return;
+        if (typeof r === 'string') return fail(r);
+        thorQ = r.thor;
+        if (!r.thor.ok) return fail(thorError(r.thor), `thor-${r.thor.kind}`);
+        const q = r.thor.q;
+        const cost = 100 * (1 - Number(q.expectedOut) / Number(units1e8));
+        head.append(`You send ${amt.value.trim()} PUSD and receive about `, el('strong', {}, `${formatThor(q.expectedOut)} ${st.symbol}`), ` on ${st.chain}.`);
+        row('1. Cauldron buys your PUSD', `${fmtBch(r.sell.sats)} (after the 0.3% pool fee, ${fmtSat(r.sell.lpFee)})`);
+        row('2. BCH network fees', `${fmtSat(r.swapFee)} swap + ${fmtSat(r.sendFee)} send to THORChain`);
+        row('3. Sent to THORChain', fmtBch(r.toThor));
+        row('4. THORChain fees', `${formatThor(q.fees.total)} ${st.symbol} in total (${q.fees.totalBps} bps; liquidity ${formatThor(q.fees.liquidity)}, outbound ${formatThor(q.fees.outbound)}, slippage ${q.fees.slippageBps} bps)`);
+        row('End-to-end cost', `${cost.toFixed(2)}%`, 'bridge-cost');
+        row('THORChain minimum', `${formatThor(q.minIn, 8)} BCH into the vault`);
+        row('Time', `about ${Math.round(q.seconds / 60)} min (THORChain waits for a BCH confirmation)`);
+        row('Vault', `${q.inboundAddress} (an active THORChain vault; the memo pays your address)`);
+      } else {
+        const d = bchDestination(dest.value);
+        if (typeof d === 'string') return fail(d);
+        const r = await quoteIn(pools, units1e8, st, d.thor, state);
+        if (mine !== run) return;
+        thorQ = r.thor;
+        if (!r.thor.ok) return fail(thorError(r.thor), `thor-${r.thor.kind}`);
+        const q = r.thor.q;
+        if (!r.buy) return fail('THORChain would deliver too little BCH to buy any PUSD.');
+        const got = r.buy.units;
+        const cost = 100 * (1 - Number(got) / Number(pusd));
+        head.append(`You send ${amt.value.trim()} ${st.symbol} on ${st.chain} and end with about `, el('strong', {}, `${formatUnits(got, net.token.decimals)} PUSD`), '.');
+        row('1. THORChain delivers', `${fmtBch(q.expectedOut)} to ${d.thor.slice(0, 12)}…`);
+        row('2. THORChain fees', `${fmtBch(q.fees.total)} in total (${q.fees.totalBps} bps; liquidity ${fmtSat(q.fees.liquidity)}, outbound ${fmtSat(q.fees.outbound)}, slippage ${q.fees.slippageBps} bps)`);
+        row('3. Cauldron sells you PUSD', `${formatUnits(got, net.token.decimals)} PUSD for ${fmtSat(r.buy.poolSats)} (incl. the 0.3% pool fee) + ${fmtSat(r.swapFee)} network fee`);
+        row('PUSD goes to', d.token);
+        row('End-to-end cost', `${cost.toFixed(2)}%`, 'bridge-cost');
+        row('THORChain minimum', `${formatThor(q.minIn)} ${st.symbol}`);
+        row('Time', `about ${Math.max(1, Math.round(q.seconds / 60))} min for THORChain, then one BCH transaction`);
+        row('Deposit', `approve the router ${q.router?.slice(0, 10)}… for exactly the amount, then depositWithExpiry to vault ${q.inboundAddress.slice(0, 10)}…`);
+      }
+      const q = thorQ.ok ? thorQ.q : null;
+      if (q) {
+        const left = el('dd', { id: 'bridge-expiry' });
+        const tick = () => {
+          const s = q.expiry - Math.floor(Date.now() / 1000);
+          left.textContent = s > 0 ? `${Math.floor(s / 60)} min ${s % 60} s (THORChain: do not send after it)` : 'expired, ask again';
+        };
+        tick();
+        dl.append(el('dt', {}, 'Quote valid for'), left);
+        const iv = setInterval(() => { if (mine !== run) clearInterval(iv); else tick(); }, 1000);
+        box.dataset.expectedOut = String(q.expectedOut);
+        box.dataset.memo = q.memo;
+        box.dataset.amountIn = String(q.req.amountIn);
+      }
+      box.dataset.state = 'quoted';
+      out.replaceChildren(head, dl, el('p', { class: 'muted small' },
+        'Live quote from THORChain and Cauldron; it refreshes every 30 seconds. Rates are never promised: THORChain prices BCH by its own pools.'));
+      clearTimeout(timer);
+      timer = window.setTimeout(() => { if (!document.hidden && mine === run) void quote(); }, 30000);
+    } catch (e) {
+      fail(`Could not get a quote: ${String(e).slice(0, 160)}`);
+    }
+  }
+  form.addEventListener('submit', (ev) => { ev.preventDefault(); void quote(); });
+  void loadState();
+}
+
 function render() {
   const app = document.getElementById('app')!;
   const header = el('header', { class: 'banner' });
@@ -313,6 +480,7 @@ function render() {
   if (pay.ok) renderPayment(app, pay.req);
   else renderGenerator(app, pay.error);
   renderWallet(app);
+  renderBridge(app);
   void renderPools(app);
 }
 

@@ -70,18 +70,39 @@ export function estimateNetworkFee(buyerInputs = 1, satsPerByte = 1n): bigint {
   return BigInt(445 + 148 * Math.max(0, buyerInputs - 1)) * satsPerByte;
 }
 
+export function toSdkPool(p: Pool): CauldronActivePool {
+  return { owner_p2pkh_addr: p.owner_p2pkh_addr ?? '', owner_pkh: p.owner_pkh ?? '',
+    sats: p.sats, token_id: p.token_id, tokens: p.tokens, tx_pos: p.tx_pos, txid: p.txid };
+}
+
 export function bestQuote(pools: Pool[], units: bigint, buyerInputs = 1): Quote | null {
   let best: Quote | null = null;
   for (const p of pools) {
     if (BigInt(p.tokens) <= units) continue;
-    const sdkPool: CauldronActivePool = { owner_p2pkh_addr: p.owner_p2pkh_addr ?? '', owner_pkh: p.owner_pkh ?? '',
-      sats: p.sats, token_id: p.token_id, tokens: p.tokens, tx_pos: p.tx_pos, txid: p.txid };
-    const { supplyAmount, feeAmount } = calcBuyFromPool(sdkPool, units);
+    const { supplyAmount, feeAmount } = calcBuyFromPool(toSdkPool(p), units);
     if (!best || supplyAmount < best.poolSats) {
       best = { pool: p, units, poolSats: supplyAmount, lpFeeSats: feeAmount, networkFeeSats: estimateNetworkFee(buyerInputs) };
     }
   }
   return best;
+}
+
+// Build rule 5: re-quote right before the sign request. Every trade replaces a pool's UTXO, so a tx built
+// on the pool the buyer saw can be invalid by the time the wallet signs. Use the fresh pool; if the price
+// rose by more than `toleranceBps`, the buyer has to see and accept the new price first.
+export type Fresh =
+  | { ok: true; quote: Quote; moved: boolean }
+  | { ok: false; reason: 'gone' | 'price-up'; quote: Quote | null; error: string };
+
+export function freshQuote(shown: Quote, pools: Pool[], toleranceBps = 50n, buyerInputs = 1): Fresh {
+  const q = bestQuote(pools, shown.units, buyerInputs);
+  if (!q) return { ok: false, reason: 'gone', quote: null, error: 'No single pool can fill this payment any more.' };
+  const moved = q.pool.txid !== shown.pool.txid || q.pool.tx_pos !== shown.pool.tx_pos;
+  if (q.poolSats * 10000n > shown.poolSats * (10000n + toleranceBps)) {
+    return { ok: false, reason: 'price-up', quote: q,
+      error: `The price moved from ${shown.poolSats} to ${q.poolSats} sat since you saw it. Check the new price before paying.` };
+  }
+  return { ok: true, quote: q, moved };
 }
 
 export function payLink(base: string, to: string, amount: string, memo: string): string {

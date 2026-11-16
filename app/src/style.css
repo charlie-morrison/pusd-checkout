@@ -48,3 +48,11 @@ dd code { overflow-wrap: anywhere; }
 .card.pay h2 { font-size: 1.4rem; }
 #pay-total { font-size: 1.15rem; margin: 6px 0; }
 #pay-to { overflow-wrap: anywhere; }
+#bridge-form { display: grid; gap: 6px; margin: 8px 0; }
+#bridge-form > label { color: var(--muted); font-size: 0.9rem; }
+#bridge-form input[type=text], #bridge-form select { font: inherit; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg); min-width: 0; }
+#bridge-form button { justify-self: start; margin-top: 6px; }
+#bridge-form fieldset.dir { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+#bridge-form fieldset.dir legend { color: var(--muted); font-size: 0.9rem; padding: 0; margin-bottom: 4px; }
+#bridge-quote dd { overflow-wrap: anywhere; }
+#bridge-total { font-size: 1.1rem; margin: 6px 0; }
