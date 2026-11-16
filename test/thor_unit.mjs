@@ -1,6 +1,6 @@
 // Unit test of the THORChain half of the quote engine (app/src/thor.ts), the bridge legs
 // (app/src/bridge.ts) and the rule-5 re-quote (app/src/quote.ts freshQuote).
-// Fixtures: LIVE THORChain answers saved 16.11.2026 16:4xZ (test/fixtures/thor-20261116/), plus
+// Fixtures: LIVE THORChain answers saved 16.11.2026 16:05Z (test/fixtures/thor-20261116/), plus
 // tampered copies of them. No network: fetch is stubbed.
 // Usage: node test/thor_unit.mjs [app/src dir]   (Node >= 23)   Exit 0 = all pass, 1 = a case failed.
 import fs from 'node:fs';

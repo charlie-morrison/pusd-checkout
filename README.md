@@ -125,6 +125,18 @@ All keys in these scripts are generated per run and thrown away. Nothing here ho
     Both directions must produce a memo that pays the entered address, and an output equal to an independent
     THORChain quote within 1%. A closed chain must show its reason, bad addresses must be refused, and chipnet must
     say that the bridge runs on mainnet only.
+- 16.11, later: the payment transaction, not on the page yet. `app/src/paytx.ts` builds it from the coins the scan
+  found. Input 0 is the Cauldron pool, which the page unlocks. Inputs 1 and up are the buyer's coins, largest first,
+  and each one tells the wallet its own path (receive or change, and the index). The outputs are the pool, the
+  merchant's tokens on 1,000 sat, and the buyer's change. The network fee is sized for the signed transaction, and
+  change too small to send goes to the miner. The prompt the wallet shows says what the buyer pays and to whom.
+  `checkSigned` rejects a signed transaction unless only signatures were added: same inputs, same outputs byte for
+  byte, and the pool's unlock untouched.
+  - `test/paytx_unit.mjs`: 24 cases. A test wallet with a random seed signs the buyer's inputs at the paths the page
+    asks for, and the BCH 2025 virtual machine must accept the result: the pool covenant plus both signatures. A
+    signature from the wrong key gets past `checkSigned`, because signatures are the wallet's job, and the VM refuses
+    it. Changed outputs, an extra output, a changed pool unlock, a moved input and an unsigned input are all rejected.
+    Eight broken copies fail it.
 
 Build: Node 24, `npm ci --ignore-scripts`, `npm run build` (output in `dist/`), `npm run dev` for a local server.
 
