@@ -102,6 +102,22 @@ t('dust change goes to the miner (no change output, fee absorbs it)', () => {
   return typeof r === 'object' && r.transaction.outputs.length === 2 && r.change === 0n && r.networkFee === 450n;
 });
 
+// build rule 5 on chain (17.11): the indexer's outpoint is replaced by what the chain holds at the pool address
+t('live pools: a spent indexer outpoint is replaced by the live outputs (both pools of one owner kept)', () => {
+  const live = pt.livePoolsOf(pool, [{ txid: fakeTxid('next'), vout: 0, satoshis: 10_008_000n, token: { category: CAT, amount: 9_992n } },
+    { txid: fakeTxid('next'), vout: 2, satoshis: 30_000n, token: { category: CAT, amount: 300n } }]);
+  return live.length === 2 && live[0].txid === fakeTxid('next') && live[0].tx_pos === 0 && live[0].sats === 10_008_000 && live[0].tokens === 9_992
+    && live[1].tx_pos === 2 && live.every((p) => p.owner_pkh === ownerPkh);
+});
+t('live pools: other tokens, NFTs and plain BCH at the address are not pools', () =>
+  pt.livePoolsOf(pool, [{ txid: fakeTxid('a'), vout: 0, satoshis: 5000n, token: { category: fakeTxid('other'), amount: 5n } },
+    { txid: fakeTxid('b'), vout: 0, satoshis: 5000n, token: { category: CAT, amount: 5n, nft: { capability: 'none' } } },
+    { txid: fakeTxid('c'), vout: 0, satoshis: 5000n }]).length === 0);
+t('pool address = the address the pool output pays (same locking bytecode)', () => {
+  const lock = la.binToHex(la.cashAddressToLockingBytecode(pt.poolAddress(pool, provider)).bytecode);
+  return lock === la.binToHex(req.transaction.outputs[0].lockingBytecode);
+});
+
 let fail = 0;
 for (const [name, fn] of cases) {
   let ok = false, err = '';

@@ -6,7 +6,7 @@
 
 import {
   binToHex, cashAddressToLockingBytecode, decodeCashAddress, decodeTransaction, encodeTransaction,
-  encodeTransactionOutputs, hexToBin, type Transaction,
+  encodeTransactionOutputs, hash256, hexToBin, type Transaction,
 } from '@bitauth/libauth';
 import { Contract, TransactionBuilder, placeholderP2PKHUnlocker, type NetworkProvider } from 'cashscript';
 import { calcBuyFromPool } from '@mr-zwets/cauldron-swap-sdk';
@@ -144,4 +144,33 @@ export function checkSigned(req: PayTx, signedHex: string): string | null {
   if (binToHex(s.inputs[0].unlockingBytecode) !== binToHex(r.inputs[0].unlockingBytecode)) return 'The wallet changed the pool input.';
   if (binToHex(encodeTransactionOutputs(s.outputs)) !== binToHex(encodeTransactionOutputs(r.outputs))) return 'The wallet changed the outputs.';
   return null;
+}
+
+// Relay form of the source outputs (build rule 1): bytes as hex, bigints as "<bigint: Xn>".
+const toRelay = (x: unknown): unknown => (x instanceof Uint8Array ? binToHex(x) : typeof x === 'bigint' ? `<bigint: ${x}n>`
+  : Array.isArray(x) ? x.map(toRelay) : x && typeof x === 'object'
+    ? Object.fromEntries(Object.entries(x as Record<string, unknown>).map(([k, v]) => [k, toRelay(v)])) : x);
+
+// The WizardConnect `transaction` field. Build rule 7: the tx travels as hex. broadcast:false: the wallet
+// hands the signed tx back and the page sends it only after checkSigned (rule 4), so nothing the buyer did
+// not see can reach the chain.
+export function wcRequest(tx: PayTx) {
+  return { transaction: tx.hex, sourceOutputs: toRelay(tx.sourceOutputs), broadcast: false, userPrompt: tx.userPrompt };
+}
+
+export const txidOf = (hex: string) => binToHex(hash256(hexToBin(hex)).slice().reverse());
+
+export const poolAddress = (pool: Pool, provider: NetworkProvider) =>
+  new Contract(cauldronArtifactWithPkh(pool.owner_pkh ?? ''), [], { provider, addressType: 'p2sh32' }).address;
+
+export interface LiveUtxo { txid: string; vout: number; satoshis: bigint; token?: { category: string; amount: bigint; nft?: unknown } }
+
+// Build rule 5 on the chain, not on the indexer. Measured 17.11 on chipnet: five minutes after our own
+// payment had spent a pool, the indexer still listed the spent outpoint, so a second payment built on it
+// was refused by the node. Swap the indexer's pools of this owner for the outputs the chain holds now at
+// the pool contract's address (same owner key, same token, no NFT). An owner may run several pools there.
+export function livePoolsOf(owner: Pool, utxos: LiveUtxo[]): Pool[] {
+  return utxos.filter((u) => u.token && u.token.category === owner.token_id && !u.token.nft && u.token.amount > 0n && u.satoshis > 0n)
+    .map((u) => ({ ...owner, pool_id: `${u.txid}:${u.vout}`, txid: u.txid, tx_pos: u.vout,
+      sats: Number(u.satoshis), tokens: Number(u.token!.amount) }));
 }

@@ -56,3 +56,5 @@ dd code { overflow-wrap: anywhere; }
 #bridge-form fieldset.dir legend { color: var(--muted); font-size: 0.9rem; padding: 0; margin-bottom: 4px; }
 #bridge-quote dd { overflow-wrap: anywhere; }
 #bridge-total { font-size: 1.1rem; margin: 6px 0; }
+
+button:disabled { opacity: 0.45; cursor: not-allowed; }

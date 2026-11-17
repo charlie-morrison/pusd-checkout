@@ -91,7 +91,7 @@ All keys in these scripts are generated per run and thrown away. Nothing here ho
   (`?to=<address>&usd=12.50&memo=…`) opens a payment card with a live quote: the cheapest single Cauldron pool that
   can deliver exactly that amount, the 0.3% pool fee, and an estimated network fee. It refreshes every 30 seconds.
   Once a wallet is connected, the card says whether the wallet holds enough. Addresses that cannot receive tokens,
-  addresses of the other network, and malformed amounts are rejected. Paying itself is not live yet.
+  addresses of the other network, and malformed amounts are rejected. (Paying went live on 17.11, see below.)
   - `test/quote_unit.mjs`: 16 cases. The quote must equal the Cauldron SDK's own optimiser limited to one pool,
     checked against live mainnet pools. Four broken copies fail it: one picks the priciest pool, one accepts any
     address type, one skips the network check, one lets a pool sell its last token.
@@ -137,6 +137,35 @@ All keys in these scripts are generated per run and thrown away. Nothing here ho
     signature from the wrong key gets past `checkSigned`, because signatures are the wallet's job, and the VM refuses
     it. Changed outputs, an extra output, a changed pool unlock, a moved input and an unsigned input are all rejected.
     Eight broken copies fail it.
+- 17.11: paying is live. The card gets a Pay button once a wallet is connected, its coins are found and it holds
+  enough. When you press it, the page:
+  - quotes again on the pools as they are now. The pool's coin comes from a Fulcrum node, not from the pool indexer:
+    on chipnet the indexer was still listing a pool coin five minutes after our own payment had spent it, and the
+    node refused the next payment built on it;
+  - shows you the new price and waits for a second press if the price rose by more than 0.5%;
+  - builds the transaction and sends the sign request with the transaction as hex, the cost in the prompt, and
+    `broadcast: false`. The wallet hands the signed transaction back, and the page sends it only after
+    `checkSigned` passes, so a transaction you did not see never reaches the network;
+  - shows the transaction id, or says in plain words why nothing was spent: you rejected it, the wallet changed it,
+    or the pool moved before it reached the network.
+  - The card's total now includes the 1,000 sat that go to the merchant with the tokens. Before 17.11 it left them
+    out, and the 15.11 test checked it against a reference that left them out too.
+  - If the change would be below 546 sat, it cannot be sent back and goes to the miners; the signing line says so.
+  - `test/wc_sign_unit.mjs`: 10 cases, offline. The sign request goes through JSON as it would over the relay, the
+    test wallet signs both buyer inputs (receive/3 and change/2), and the BCH 2025 VM accepts the result. A wallet
+    that changes an output after signing is caught by `checkSigned`. The wallet refuses a path that is not its own
+    and a transaction that is not hex.
+  - `test/pay_wc_e2e.py`, chipnet, live relay, the test wallet from the scan test:
+    - a wallet that takes 1,000 sat off an output after signing gets "Not sent", and its transaction is not on chain;
+    - an honest payment of 78 TEST spends receive/3 and change/2 and pays exactly 78 TEST to the merchant
+      ([4cc1030c…](https://chipnet.imaginary.cash/tx/4cc1030c0e53494da7ead827ed97036832401bddf80ccd9427b6752e30d7a69d));
+    - 40 TEST spends the change of that payment on change/3, on the pool coin the node reported while the indexer
+      still listed the old one
+      ([100cde84…](https://chipnet.imaginary.cash/tx/100cde842c4a1eab52d2d9fc5141a9d049f43f40ddbe58377194bcdd02afaff2));
+    - 15 TEST: the price had moved 0.83%, so the page showed the new price, the second press paid it
+      ([4d869d9d…](https://chipnet.imaginary.cash/tx/4d869d9dd59c0370689b71dc470ac34229d0f06c4c88268c1c5bd408e4b353d2)).
+  - Real wallets on this exact flow (Cashonize, Paytaca) are the next step. Both have signed and sent this
+    transaction shape from a script before: Cashonize on 06.11, Paytaca (hex form) on 11.11.
 
 Build: Node 24, `npm ci --ignore-scripts`, `npm run build` (output in `dist/`), `npm run dev` for a local server.
 

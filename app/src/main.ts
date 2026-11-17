@@ -3,18 +3,23 @@ import { netFromUrl, urlForNet, NETWORKS, PRIZE_ADDRESS, type NetName } from './
 import { fetchPools, summarize, formatUnits } from './pools';
 import { WalletLink, type LinkState } from './wallet';
 import { qrSvg } from './qr';
-import { scanWallet, GAP_LIMIT, type ScanResult } from './utxos';
-import { withElectrum } from './chain';
-import { parsePayRequest, bestQuote, payLink, checkMerchantAddress, parseAmount, MEMO_MAX, type PayRequest } from './quote';
+import { scanWallet, addressOf, GAP_LIMIT, type ScanResult, type FoundUtxo } from './utxos';
+import { withElectrum, sendChecked, utxosAt } from './chain';
+import { parsePayRequest, bestQuote, freshQuote, payLink, checkMerchantAddress, parseAmount, MEMO_MAX,
+  type PayRequest, type Quote } from './quote';
+import { buildPayment, checkSigned, wcRequest, txidOf, poolAddress, livePoolsOf, MERCHANT_DUST, type PayTx } from './paytx';
+import { ElectrumNetworkProvider, Network } from 'cashscript';
 import { STABLES, readThorState, chainStatus, thorUnits, formatThor, type ThorState, type QuoteResult } from './thor';
 import { quoteOut, quoteIn, bchDestination, evmDestination } from './bridge';
 
 const net = netFromUrl(location.search);
 const prefix = net.name === 'chipnet' ? 'bchtest' : 'bitcoincash';
 
-// Shared between the payment card and the wallet card: the buyer's spendable coins and the BCH the
-// current quote needs. Either side redraws the "enough?" line when its half changes.
-let funds: { sats: bigint } | null = null;
+// Shared between the payment card and the wallet card: the buyer's spendable coins (with their wallet
+// paths, build rule 8), an unused change address, and the BCH the current quote needs. Either side
+// redraws the "enough?" line and the Pay button when its half changes.
+let funds: { sats: bigint; coins: FoundUtxo[]; changeAddress: string } | null = null;
+let walletLink: WalletLink | null = null;
 let needSats: bigint | null = null;
 const fundsListeners: (() => void)[] = [];
 const fundsChanged = () => fundsListeners.forEach((f) => f());
@@ -77,6 +82,8 @@ function renderWallet(root: HTMLElement) {
     if (s.kind !== 'connected') { funds = null; fundsChanged(); }
     draw(s);
   });
+  walletLink = link;
+  rescan = () => { const c = document.getElementById('coins'); if (c) void scanCoins(c); };
 
   function draw(s: LinkState) {
     box.dataset.state = s.kind;
@@ -144,7 +151,11 @@ function renderWallet(root: HTMLElement) {
   }
 
   function drawCoins(box: HTMLElement, r: ScanResult) {
-    funds = { sats: r.spendableSats };
+    // Change goes to the first unused change address (a fresh address per payment, TG #3069); a wallet
+    // that did not share its change chain gets it on its first unused receive address.
+    const chain = r.chains.change.stopped === 'no-xpub' ? 'receive' : 'change';
+    const pub = link.pubkeyAt(chain === 'change' ? 1 : 0, BigInt(r.chains[chain].lastUsed + 1));
+    funds = pub ? { sats: r.spendableSats, coins: r.spendable, changeAddress: addressOf(pub, prefix) } : null;
     fundsChanged();
     box.dataset.state = 'done';
     box.dataset.sats = String(r.spendableSats);
@@ -180,6 +191,9 @@ function renderWallet(root: HTMLElement) {
   addEventListener('pagehide', () => link.stop(false));
 }
 
+let rescan: () => void = () => undefined;
+
+
 const fmtBch = (sats: bigint) => `${formatUnits(sats, 8)} BCH`;
 const fmtSat = (sats: bigint) => `${sats.toLocaleString('en-US')} sat`;
 
@@ -192,53 +206,162 @@ function renderPayment(root: HTMLElement, req: PayRequest) {
   if (req.memo) box.append(el('p', { class: 'small', id: 'pay-memo' }, `Memo: ${req.memo}`));
   const q = el('div', { id: 'pay-quote' });
   const enough = el('p', { id: 'pay-funds', class: 'small' });
-  box.append(q, enough);
+  const payBtn = el('button', { type: 'button', id: 'pay-go', disabled: '' }, 'Pay') as HTMLButtonElement;
+  const cancelBtn = el('button', { type: 'button', id: 'pay-cancel', class: 'secondary', hidden: '' }, 'Cancel');
+  const result = el('div', { id: 'pay-result', 'aria-live': 'polite' });
+  box.append(q, enough, payBtn, cancelBtn, result);
   box.append(el('p', { class: 'muted small' },
-    'The quote refreshes every 30 seconds. The final amount is fixed when your wallet signs.'));
+    'The quote refreshes every 30 seconds. Right before your wallet signs, the page quotes again on the current pool; if the ' +
+    'price went up, you see the new price first. The page sends only a transaction it has checked against what you saw.'));
   root.append(box);
 
+  let shown: Quote | null = null;
+  let busy = false;
   const drawFunds = () => {
-    if (needSats === null) { enough.textContent = ''; return; }
-    if (!funds) { enough.textContent = 'Connect a wallet below to check your balance.'; enough.className = 'small muted'; box.dataset.funds = 'unknown'; return; }
+    // After a payment the rescan shows what is left; a red "not enough" under "Paid" reads as a failure.
+    payBtn.hidden = box.dataset.state === 'paid';
+    if (box.dataset.state === 'paid') { enough.textContent = ''; payBtn.disabled = true; return; }
+    if (needSats === null) { enough.textContent = ''; payBtn.disabled = true; return; }
+    if (!funds) { enough.textContent = 'Connect a wallet below to check your balance.'; enough.className = 'small muted'; box.dataset.funds = 'unknown'; payBtn.disabled = true; return; }
     const ok = funds.sats >= needSats;
     box.dataset.funds = ok ? 'enough' : 'short';
     enough.className = ok ? 'small ok' : 'small error';
     enough.textContent = ok ? `Your wallet has enough: ${fmtBch(funds.sats)}.`
       : `Not enough in this wallet: it has ${fmtBch(funds.sats)}, the payment needs about ${fmtBch(needSats)}.`;
+    payBtn.disabled = busy || !ok || !shown;
   };
   fundsListeners.push(drawFunds);
 
+  const drawQuote = (qt: Quote, poolCount: number) => {
+    shown = qt;
+    // The buyer also pays the BCH that rides on the merchant's token output (MERCHANT_DUST). Measured 17.11:
+    // without it the card said 9,253 sat while the wallet asked for 10,408 for the same payment.
+    const total = qt.poolSats + MERCHANT_DUST + qt.networkFeeSats;
+    needSats = total;
+    box.dataset.totalSats = String(total);
+    q.replaceChildren();
+    const head = el('p', { id: 'pay-total' });
+    head.append('You pay about ', el('strong', {}, fmtBch(total)));
+    q.append(head);
+    const dl = el('dl', { class: 'small' });
+    const row = (k: string, v: string) => dl.append(el('dt', {}, k), el('dd', {}, v));
+    row('Into the pool', `${fmtSat(qt.poolSats)} (includes the 0.3% pool fee, ${fmtSat(qt.lpFeeSats)})`);
+    row('With the tokens', `${fmtSat(MERCHANT_DUST)} (a token output must carry some BCH; it goes to the merchant with the ${net.token.symbol})`);
+    row('Network fee', `about ${fmtSat(qt.networkFeeSats)} (more if your coins sit on several addresses)`);
+    row('Merchant receives', `${req.display} ${net.token.symbol}`);
+    row('Pool', `${qt.pool.txid.slice(0, 10)}… (the cheapest single pool of ${poolCount})`);
+    q.append(dl);
+  };
+
   async function requote() {
+    if (busy) return; // never swap the quote under a sign request
     try {
       const pools = await fetchPools(net.indexer, net.token.category);
       const qt = bestQuote(pools, req.units);
-      q.replaceChildren();
+      if (busy) return;
       if (!qt) {
         box.dataset.state = 'no-liquidity';
-        needSats = null;
-        q.append(el('p', { class: 'error' }, `No single ${net.token.symbol} pool can fill ${req.display} right now. Try a smaller amount.`));
+        needSats = null; shown = null;
+        q.replaceChildren(el('p', { class: 'error' }, `No single ${net.token.symbol} pool can fill ${req.display} right now. Try a smaller amount.`));
       } else {
-        const total = qt.poolSats + qt.networkFeeSats;
-        needSats = total;
-        box.dataset.state = 'quoted';
-        box.dataset.totalSats = String(total);
-        const head = el('p', { id: 'pay-total' });
-        head.append('You pay about ', el('strong', {}, fmtBch(total)));
-        q.append(head);
-        const dl = el('dl', { class: 'small' });
-        const row = (k: string, v: string) => dl.append(el('dt', {}, k), el('dd', {}, v));
-        row('Into the pool', `${fmtSat(qt.poolSats)} (includes the 0.3% pool fee, ${fmtSat(qt.lpFeeSats)})`);
-        row('Network fee', `about ${fmtSat(qt.networkFeeSats)}`);
-        row('Merchant receives', `${req.display} ${net.token.symbol}`);
-        row('Pool', `${qt.pool.txid.slice(0, 10)}… (the cheapest single pool of ${pools.length})`);
-        q.append(dl);
+        drawQuote(qt, pools.length);
+        if (!['paid', 'refused', 'rejected', 'send-error', 'price-up', 'build-error'].includes(box.dataset.state ?? '')) box.dataset.state = 'quoted';
       }
     } catch (e) {
+      if (busy) return;
       box.dataset.state = 'error';
+      shown = null;
       q.replaceChildren(el('p', { class: 'error' }, `Could not read pools: ${String(e).slice(0, 160)}`));
     }
     drawFunds();
   }
+
+  let abort: AbortController | null = null;
+  const say = (state: string, cls: string, ...parts: (string | Node)[]) => {
+    box.dataset.state = state;
+    const p = el('p', { class: cls, id: 'pay-message' });
+    p.append(...parts);
+    result.replaceChildren(p);
+  };
+  const finish = () => { busy = false; abort = null; cancelBtn.hidden = true; drawFunds(); };
+  cancelBtn.addEventListener('click', () => abort?.abort('The buyer cancelled the payment on the page.'));
+
+  async function pay() {
+    const dm = walletLink?.manager;
+    if (busy || !shown || !funds || !dm || walletLink?.state.kind !== 'connected') return;
+    busy = true; payBtn.disabled = true;
+    try {
+      say('preparing', 'muted small', 'Checking the pool again before your wallet signs…');
+      // Build rule 5: the pool UTXO changes with every trade, so quote on the current pool right now, and
+      // take the pool's outpoint from the chain: the indexer can still list an outpoint that is spent.
+      const provider = new ElectrumNetworkProvider(net.name === 'chipnet' ? Network.CHIPNET : Network.MAINNET, { manualConnectionManagement: true });
+      let pools = await fetchPools(net.indexer, net.token.category);
+      let fresh = freshQuote(shown, pools);
+      const checked = new Set<string>();
+      for (let i = 0; i < 4 && fresh.ok && !checked.has(fresh.quote.pool.owner_pkh ?? ''); i++) {
+        const owner = fresh.quote.pool;
+        checked.add(owner.owner_pkh ?? '');
+        const live = livePoolsOf(owner, await utxosAt(net.name, poolAddress(owner, provider)));
+        pools = [...pools.filter((p) => p.owner_pkh !== owner.owner_pkh), ...live];
+        fresh = freshQuote(shown, pools);
+      }
+      if (fresh.ok && !checked.has(fresh.quote.pool.owner_pkh ?? '')) {
+        return say('gone', 'error', 'The pools are changing too fast to check right now. Press Pay to try again.');
+      }
+      box.dataset.poolOutpoint = fresh.ok ? `${fresh.quote.pool.txid}:${fresh.quote.pool.tx_pos}` : '';
+      if (!fresh.ok) {
+        if (fresh.quote) drawQuote(fresh.quote, pools.length); else { shown = null; needSats = null; }
+        return say(fresh.reason, 'error', fresh.reason === 'price-up'
+          ? `${fresh.error} Press Pay again to pay the new price.` : fresh.error);
+      }
+      if (fresh.moved) drawQuote(fresh.quote, pools.length);
+      const tx: PayTx | string = buildPayment({ pool: fresh.quote.pool, units: req.units, merchant: req.to, coins: funds.coins,
+        changeAddress: funds.changeAddress, provider, label: `${req.display} ${net.token.symbol}` });
+      if (typeof tx === 'string') return say('build-error', 'error', tx);
+      box.dataset.buyerPays = String(tx.buyerPays);
+      say('signing', 'small', 'Your wallet is asking you to sign: ', el('strong', {}, tx.userPrompt),
+        `. Total ${fmtSat(tx.buyerPays)}: ${fmtSat(tx.poolCost)} into the pool, ${fmtSat(MERCHANT_DUST)} with the merchant's tokens, ${fmtSat(tx.networkFee)} network fee.`,
+        // Measured 17.11: 485 sat of change cannot be sent back (below 546), so paytx leaves it to the miners;
+        // the wallet showed the true total, the card did not say why it was higher than "about".
+        tx.change === 0n && tx.buyerPays > (needSats ?? 0n)
+          ? ' Your leftover change was below 546 sat, too small to send back, so it is part of the network fee.' : '');
+      abort = new AbortController();
+      cancelBtn.hidden = false;
+      const wire = wcRequest(tx);
+      let resp;
+      try {
+        resp = await dm.signTransaction({ transaction: wire as never, inputPaths: tx.inputPaths }, { signal: abort.signal });
+      } catch (e) {
+        return say('rejected', 'error', `The wallet did not sign: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
+      }
+      cancelBtn.hidden = true;
+      if (resp.error || !resp.signedTransaction) return say('rejected', 'error', `The wallet did not sign: ${String(resp.error ?? 'no transaction returned').slice(0, 160)}`);
+      const bad = checkSigned(tx, resp.signedTransaction);
+      if (bad) return say('refused', 'error', `Not sent: ${bad} The page only sends the transaction you saw, so nothing was spent.`);
+      const txid = txidOf(resp.signedTransaction);
+      box.dataset.txid = txid;
+      say('sending', 'muted small', 'Signed and checked. Sending it to the network…');
+      try {
+        await sendChecked(net.name, resp.signedTransaction, txid);
+      } catch (e) {
+        const m = String((e as Error)?.message ?? e);
+        const stale = /missing|inputs|conflict|spent|mempool/i.test(m);
+        box.dataset.sendError = m.slice(0, 200);
+        return say('send-error', 'error', stale
+          ? `Another trade used the pool before this payment reached the network, so nothing was spent. Press Pay to try again on a fresh quote. (Node: ${m.slice(0, 120)})`
+          : `The network refused the payment, so nothing was spent: ${m.slice(0, 160)}`);
+      }
+      const a = el('a', { href: net.explorerTx(txid), id: 'pay-txid', target: '_blank', rel: 'noopener' }, txid);
+      say('paid', 'ok', `Paid. The merchant receives ${req.display} ${net.token.symbol} in this transaction: `, a);
+      rescan();
+    } catch (e) {
+      say('error', 'error', `Payment stopped: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
+    } finally {
+      finish();
+    }
+  }
+  payBtn.addEventListener('click', () => void pay());
+
   void requote();
   setInterval(() => { if (!document.hidden) void requote(); }, 30000);
 }
@@ -473,7 +596,7 @@ function render() {
   intro.append(el('p', {},
     'A merchant sets a price in US dollars and shares a link. The buyer pays BCH from a WizardConnect wallet, and in ' +
     'the same transaction the BCH is swapped on a Cauldron pool, so the merchant receives PUSD, a dollar stablecoin ' +
-    'on Bitcoin Cash. Paying is not live yet: this build makes the link, quotes it live and finds the buyer\'s coins.'));
+    'on Bitcoin Cash. The page holds no keys: your wallet signs, and the page checks the signed transaction before it sends it.'));
   app.append(intro);
 
   const pay = parsePayRequest(location.search, prefix, net.token.decimals);

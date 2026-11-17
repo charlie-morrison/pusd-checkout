@@ -34,7 +34,7 @@ import { computeOptimalBuy } from '@mr-zwets/cauldron-swap-sdk';
 const [indexer, token, units] = process.argv.slice(1);
 const pools = (await (await fetch(`${indexer}/cauldron/pool/active?token=${token}`)).json()).active.filter((p) => p.token_id === token);
 const a = computeOptimalBuy(pools, BigInt(units), 1n, 1);
-console.log(String(a.reduce((s, x) => s + x.supplyAmount, 0n) + 445n));
+console.log(String(a.reduce((s, x) => s + x.supplyAmount, 0n) + 1000n + 445n)); // pool + merchant token dust + 1-input fee (17.11: the dust was missing)
 """
 
 

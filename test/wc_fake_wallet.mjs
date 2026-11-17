@@ -1,17 +1,25 @@
 // Throwaway WizardConnect wallet for testing the page's connect flow (official @wizardconnect/wallet lib).
 // Usage: node test/wc_fake_wallet.mjs <wiz:// uri, plain or QR form> [--tamper-secret] [--seconds N] [--seed-from-env]
+//          [--sign | --sign-tamper-output]
 // Prints JSON lines: the address the page should show for receive/0, then wallet-side events.
 // The seed is random per run and never stored, so that wallet holds nothing. --seed-from-env uses the
 // hex seed in WC_TEST_SEED_HEX instead (a chipnet test wallet with worthless coins, for the coin scan
 // test); the seed is never printed.
+// --sign: sign the inputs named by inputPaths, the way Cashonize / Paytaca do (P2PKH, cashscript's
+// SignatureTemplate over the whole tx + source outputs), after checking that each named input really is
+// this wallet's address at that path. Returns the signed hex and never broadcasts (the page does).
+// --sign-tamper-output: the same, then moves 1,000 sat from the last output to the miner AFTER signing,
+// i.e. a wallet that changes what the buyer saw. The page must refuse it and send nothing.
 import { createHash, randomBytes } from 'node:crypto';
 import * as core from '@wizardconnect/core';
 import { WalletConnectionManager } from '@wizardconnect/wallet';
 import * as la from '@bitauth/libauth';
+import { signRequest } from './wc_sign.mjs';
 
 const args = process.argv.slice(2);
 let uri = args[0];
 const tamper = args.includes('--tamper-secret');
+const signMode = args.includes('--sign-tamper-output') ? 'tamper-output' : args.includes('--sign') ? 'sign' : null;
 const si = args.indexOf('--seconds');
 const seconds = si >= 0 ? Number(args[si + 1]) : 40;
 const out = (o) => console.log(JSON.stringify(o));
@@ -53,7 +61,21 @@ const wm = new WalletConnectionManager({
     const enc = la.encodeHdPublicKey({ network: 'mainnet', node: la.deriveHdPublicNode(chainNode(Number(p))) });
     return typeof enc === 'string' ? enc : enc.hdPublicKey;
   },
-  signTransaction: async () => { throw new Error('this test wallet does not sign'); },
+  // Not called by the library: sign requests arrive as a 'pendingSignRequest' event (below), the way a
+  // wallet app queues them for the user's approval.
+  signTransaction: async () => { throw new Error('unused'); },
+});
+wm.on('pendingSignRequest', async ({ connectionId, request }) => {
+  try {
+    if (!signMode) throw new Error('this test wallet does not sign');
+    const r = signRequest(request, childPriv, signMode);
+    out({ signed: { txid: r.txid, inputs_signed: r.signed, mode: signMode, prompt: request.transaction?.userPrompt ?? null,
+      broadcast_flag: request.transaction?.broadcast ?? null, wire_form: typeof request.transaction?.transaction } });
+    await wm.sendSignResponse(connectionId, request.sequence, r.hex);
+  } catch (e) {
+    out({ sign_error: String(e?.message ?? e).slice(0, 200) });
+    await wm.sendSignError(connectionId, request.sequence, String(e?.message ?? e).slice(0, 200)).catch(() => undefined);
+  }
 });
 for (const ev of ['disconnect', 'connected', 'connectionstatus']) {
   wm.on?.(ev, (...a) => out({ event: ev, detail: String(a[0] ?? '').slice(0, 80) }));
