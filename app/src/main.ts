@@ -1,6 +1,6 @@
 import './style.css';
 import { netFromUrl, urlForNet, NETWORKS, PRIZE_ADDRESS, type NetName } from './config';
-import { fetchPools, summarize, formatUnits } from './pools';
+import { fetchPools, summarize, formatUnits, type Pool } from './pools';
 import { WalletLink, type LinkState } from './wallet';
 import { qrSvg } from './qr';
 import { scanWallet, addressOf, GAP_LIMIT, type ScanResult, type FoundUtxo } from './utxos';
@@ -217,6 +217,21 @@ function renderPayment(root: HTMLElement, req: PayRequest) {
 
   let shown: Quote | null = null;
   let busy = false;
+  // Build rule 10, second half (measured 18.11 with the real Cashonize): the indexer lags the chain on the
+  // pool's PRICE too, not only on a spent outpoint. After a chain-read "price-up" the 30 s requote put the
+  // indexer's older, lower price back on the card, so every later press said "price-up" again. Pools read
+  // from the chain win over the indexer's entry for the same owner for LIVE_MS.
+  const live = new Map<string, { pools: Pool[]; at: number }>();
+  const LIVE_MS = 10 * 60 * 1000;
+  const overlay = (pools: Pool[]): Pool[] => {
+    const now = Date.now();
+    let out = pools;
+    for (const [owner, v] of live) {
+      if (now - v.at > LIVE_MS) { live.delete(owner); continue; }
+      out = [...out.filter((p) => (p.owner_pkh ?? '') !== owner), ...v.pools];
+    }
+    return out;
+  };
   const drawFunds = () => {
     // After a payment the rescan shows what is left; a red "not enough" under "Paid" reads as a failure.
     payBtn.hidden = box.dataset.state === 'paid';
@@ -256,7 +271,7 @@ function renderPayment(root: HTMLElement, req: PayRequest) {
   async function requote() {
     if (busy) return; // never swap the quote under a sign request
     try {
-      const pools = await fetchPools(net.indexer, net.token.category);
+      const pools = overlay(await fetchPools(net.indexer, net.token.category));
       const qt = bestQuote(pools, req.units);
       if (busy) return;
       if (!qt) {
@@ -295,14 +310,15 @@ function renderPayment(root: HTMLElement, req: PayRequest) {
       // Build rule 5: the pool UTXO changes with every trade, so quote on the current pool right now, and
       // take the pool's outpoint from the chain: the indexer can still list an outpoint that is spent.
       const provider = new ElectrumNetworkProvider(net.name === 'chipnet' ? Network.CHIPNET : Network.MAINNET, { manualConnectionManagement: true });
-      let pools = await fetchPools(net.indexer, net.token.category);
+      let pools = overlay(await fetchPools(net.indexer, net.token.category));
       let fresh = freshQuote(shown, pools);
       const checked = new Set<string>();
       for (let i = 0; i < 4 && fresh.ok && !checked.has(fresh.quote.pool.owner_pkh ?? ''); i++) {
         const owner = fresh.quote.pool;
         checked.add(owner.owner_pkh ?? '');
-        const live = livePoolsOf(owner, await utxosAt(net.name, poolAddress(owner, provider)));
-        pools = [...pools.filter((p) => p.owner_pkh !== owner.owner_pkh), ...live];
+        const read = livePoolsOf(owner, await utxosAt(net.name, poolAddress(owner, provider)));
+        live.set(owner.owner_pkh ?? '', { pools: read, at: Date.now() });
+        pools = [...pools.filter((p) => p.owner_pkh !== owner.owner_pkh), ...read];
         fresh = freshQuote(shown, pools);
       }
       if (fresh.ok && !checked.has(fresh.quote.pool.owner_pkh ?? '')) {
