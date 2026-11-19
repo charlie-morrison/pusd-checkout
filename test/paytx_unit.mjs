@@ -113,6 +113,18 @@ t('live pools: other tokens, NFTs and plain BCH at the address are not pools', (
   pt.livePoolsOf(pool, [{ txid: fakeTxid('a'), vout: 0, satoshis: 5000n, token: { category: fakeTxid('other'), amount: 5n } },
     { txid: fakeTxid('b'), vout: 0, satoshis: 5000n, token: { category: CAT, amount: 5n, nft: { capability: 'none' } } },
     { txid: fakeTxid('c'), vout: 0, satoshis: 5000n }]).length === 0);
+// 19.11 mainnet: a real PUSD pool (98a1e22f…:0, 5,227,556 units, 25.3 BCH) makes the tx a few bytes longer than the
+// 445 B measured on chipnet; the first trial build at 445 sat then failed cashscript's 1 sat/B floor before the
+// resize loop ran ("fee per byte of 0.99"). The payment must build, at >= 1 sat/B on the SIGNED size.
+t('mainnet-sized pool (large token amount) builds at >= 1 sat/B on the signed size', () => {
+  const big = { ...pool, txid: fakeTxid('big-pool'), sats: 25_298_497_418, tokens: 5_227_556 };
+  const r = pt.buildPayment({ ...params, pool: big, units: 100n, coins: [coin(0, 0, 2_050_000n, 'mn')] });
+  if (typeof r === 'string') { console.log('   build said:', r.slice(0, 160)); return false; }
+  const tx = la.decodeTransaction(la.hexToBin(r.hex));
+  const signedLen = r.hex.length / 2 + tx.inputs.slice(1).reduce((s, i) => s + Math.max(0, 107 - i.unlockingBytecode.length), 0);
+  console.log(`   request ${r.hex.length / 2} B, signed <= ${signedLen} B, fee ${r.networkFee} sat`);
+  return r.networkFee === BigInt(signedLen);
+});
 t('pool address = the address the pool output pays (same locking bytecode)', () => {
   const lock = la.binToHex(la.cashAddressToLockingBytecode(pt.poolAddress(pool, provider)).bytecode);
   return lock === la.binToHex(req.transaction.outputs[0].lockingBytecode);

@@ -99,8 +99,18 @@ function buildPaymentUnsafe(p: PayParams): PayTx | string {
   // P2PKH unlock is at most 107 bytes (ECDSA; Schnorr is 100). Repeat until the fee stops moving.
   const signedSize = (tx: Transaction) => BigInt(encodeTransaction(tx).length)
     + tx.inputs.slice(1).reduce((s, i) => s + BigInt(Math.max(0, P2PKH_UNLOCK_MAX - i.unlockingBytecode.length)), 0n);
-  let fee = estimate(coins.length);
-  let b = build(fee);
+  // The first trial build needs a fee cashscript accepts (>= 1 sat/B of ITS size). 445 B was measured on chipnet; a
+  // mainnet PUSD pool with millions of units makes the tx a few bytes longer (19.11: "fee per byte of 0.99" on the
+  // live page). So the trial carries 100 B of headroom, capped at what the coins can pay; the loop below then sets
+  // the exact fee from the signed size. Coin selection keeps the plain estimate: the final check decides "enough".
+  const spare = total - poolCost - MERCHANT_DUST;
+  let fee = estimate(coins.length) + 100n * rate;
+  if (fee > spare) fee = spare;
+  let b: ReturnType<typeof build>;
+  try { b = build(fee); } catch (e) {
+    if (fee === spare && /fee per byte/i.test(String(e))) return 'The wallet does not hold enough BCH for this payment.';
+    throw e;
+  }
   for (let pass = 0; pass < 3; pass++) {
     const need = signedSize(b.o.transaction as Transaction) * rate;
     if (need === fee) break;
