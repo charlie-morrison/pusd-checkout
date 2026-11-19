@@ -594,7 +594,17 @@ function renderBridge(root: HTMLElement) {
 function render() {
   const app = document.getElementById('app')!;
   const header = el('header', { class: 'banner' });
-  header.append(el('h1', {}, 'PUSD checkout for Bitcoin Cash'));
+  // Organizer, BLAZE chat 18.11: say what the app is in five seconds, in big letters, with a picture of the main idea.
+  header.append(el('h1', { class: 'hero' }, 'Price it in dollars. Get paid in PUSD.'));
+  header.append(el('p', { class: 'hero-sub' },
+    'Your buyer pays BCH from their own wallet. One Bitcoin Cash transaction swaps it on a Cauldron pool, ' +
+    'so you receive PUSD, a dollar stablecoin.'));
+  const flow = el('div', { class: 'flow', 'aria-label': 'One transaction: buyer pays BCH, a Cauldron pool swaps it, the merchant gets PUSD' });
+  const step = (big: string, small: string) => { const d = el('div', { class: 'step' }); d.append(el('strong', {}, big), el('span', {}, small)); return d; };
+  flow.append(step('Buyer', 'pays BCH'), el('span', { class: 'arrow' }, '→'), step('Cauldron pool', 'swaps it'),
+    el('span', { class: 'arrow' }, '→'), step('Merchant', 'gets PUSD'));
+  header.append(flow);
+  header.append(el('p', { class: 'flow-note small muted' }, 'All three in one transaction: nobody holds the money in between.'));
   const addr = el('p', { class: 'addr' });
   addr.append('BCH CashTokens address: ', el('code', {}, PRIZE_ADDRESS));
   header.append(addr);

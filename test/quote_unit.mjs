@@ -23,6 +23,7 @@ t('address without prefix accepted', () => { const r = q.parsePayRequest(s({ to:
 t('non-token q-address rejected', () => { const r = q.parsePayRequest(s({ to: PRIZE_Q, usd: '1' }), 'bitcoincash', 2); return !r.ok && /cannot receive tokens/.test(r.error); });
 t('chipnet address on mainnet rejected', () => { const r = q.parsePayRequest(s({ to: CHIP_Z, usd: '1' }), 'bitcoincash', 2); return !r.ok && /another network/.test(r.error); });
 t('garbage address rejected', () => { const r = q.parsePayRequest(s({ to: 'bitcoincash:zzzz', usd: '1' }), 'bitcoincash', 2); return !r.ok && /not a valid/.test(r.error); });
+t('link with an address but no amount -> says the amount is missing (19.11)', () => { const r = q.parsePayRequest(s({ to: PRIZE_Z }), 'bitcoincash', 2); return !r.ok && /no amount/.test(r.error); });
 t('3 decimals rejected', () => typeof q.parseAmount('12.505', 2) === 'string');
 t('0, 1001, 1e3, -1, empty rejected', () => ['0', '0.00', '1001', '1e3', '-1', ''].every((a) => typeof q.parseAmount(a, 2) === 'string'));
 t('1000 accepted (cap), 0.01 accepted', () => q.parseAmount('1000', 2) === 100000n && q.parseAmount('0.01', 2) === 1n);

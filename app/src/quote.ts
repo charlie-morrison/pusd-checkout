@@ -45,6 +45,7 @@ export function checkMerchantAddress(to: string, prefix: 'bitcoincash' | 'bchtes
 }
 
 export function parseAmount(amount: string, decimals: number): bigint | string {
+  if (!amount) return 'The link has no amount (usd=).';
   const re = decimals > 0 ? new RegExp(`^\\d{1,7}(\\.\\d{1,${decimals}})?$`) : /^\d{1,7}$/;
   if (!re.test(amount)) {
     return decimals > 0 ? `The amount must be a number with at most ${decimals} decimals.`
