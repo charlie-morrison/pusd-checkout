@@ -167,6 +167,38 @@ All keys in these scripts are generated per run and thrown away. Nothing here ho
   - Real wallets on this exact flow (Cashonize, Paytaca) are the next step. Both have signed and sent this
     transaction shape from a script before: Cashonize on 06.11, Paytaca (hex form) on 11.11.
 
+- 18.11: a real Cashonize wallet paid through the published page on chipnet (15 TEST,
+  [4f7438d3…](https://chipnet.imaginary.cash/tx/4f7438d36fd5fb5f2c34e13d23e676070eeb6abbd4472aecbfd9004a0a008670)).
+  The pool indexer lags the chain on price as well as on spent coins, so a price read from the chain now wins over
+  the indexer for ten minutes.
+- 19.11: the first mainnet payments, Cashonize through the published page. $1
+  ([5dfe7ecd…](https://blockchair.com/bitcoin-cash/transaction/5dfe7ecd8cd6c039a6cfa99f0d2a48d6283ba2bf9607a3bf14782f36bd124e4e))
+  and $3 ([1ebc3e45…](https://blockchair.com/bitcoin-cash/transaction/1ebc3e45b4fe1ebffe7798b9d49698e2b79530425b2cb5693f1521ccc09bc156)):
+  the merchant got exactly 1.00 and 3.00 PUSD in the buyer's transaction. A mainnet pool made the transaction a few
+  bytes longer than on chipnet, and the first build failed the 1 sat/byte floor; fixed. Once, another trade spent the
+  pool while the wallet dialog was open. The node refused our transaction, and the page said nothing was spent and
+  asked for one more press.
+- 20.11: the bridge sends out. With a quote for PUSD → USDT on BNB Smart Chain on screen and a wallet holding the
+  PUSD, the card shows Send. It takes two signatures:
+  1. The PUSD is sold on one Cauldron pool. The pool is read from the chain first, and the BCH lands on the wallet's
+     own change address.
+  2. That BCH goes to the THORChain vault, with the memo in OP_RETURN. The vault comes first, the memo is under 80
+     bytes, and any change goes back to the sending address, because THORChain refunds there.
+
+  Before step 1 the page asks THORChain for a quote on what the sale will yield, so a halted chain or an amount under
+  THORChain's minimum stops the send before any PUSD is sold. Before step 2 it reads THORChain again and gets a quote
+  for the exact amount. If step 1 went out and step 2 did not, the card keeps the sale and offers to send the BCH only.
+  - First mainnet run, Cashonize: 4 PUSD sold in
+    [a5aa6ffe…](https://blockchair.com/bitcoin-cash/transaction/a5aa6ffe51805cc2732e9a6274a212374ef5479a896e1c7e1a194e71d058ccc6)
+    for 1,981,389 sat, then 1,980,537 sat to the vault with `=:BSC.USDT:0x435a…AEd0` in
+    [235d42af…](https://blockchair.com/bitcoin-cash/transaction/235d42afcd6925d47042ea9961b3f3e37a721992d83666dc7de2fda4d164cc33).
+    The quote said about 3.72 USDT.
+  - `test/bridgetx_unit.mjs`: 24 cases. The BCH 2025 VM accepts both signed transactions. The pool output matches the
+    Cauldron SDK's sell math, no token is burned, and unsold PUSD comes back as token change. Refused: a memo over
+    80 bytes, change to another address, a chipnet or script vault, and an amount the coin cannot carry.
+  - The coin scan failed twice on the default Fulcrum server and worked on the third press, so every connection now
+    falls back to three other servers.
+
 Build: Node 24, `npm ci --ignore-scripts`, `npm run build` (output in `dist/`), `npm run dev` for a local server.
 
 ## Running the scripts
