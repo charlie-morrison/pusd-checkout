@@ -16,7 +16,12 @@ const quote = await import(pathToFileURL(`${src}/quote.ts`).href);
 const fx = (n) => JSON.parse(fs.readFileSync(new URL(`./fixtures/thor-20261116/${n}.json`, import.meta.url)));
 const inbound = fx('inbound');
 const vaults = thor.activeVaults(fx('asgard_trimmed'));
-const outBsc = fx('out_bsc'), inBsc = fx('in_bsc');
+// Rule 14 (20.11): quotes are now asked with liquidity_tolerance_bps, which appends a price limit to the memo
+// (live 20.11: "=:BSC.USDT:0x435a…AEd0:360190963"). The 16.11 answers were asked without it, so the cases below
+// use them with a limit appended the same way; the raw 16.11 memos must now be refused.
+const outRaw = fx('out_bsc'), inRaw = fx('in_bsc');
+const outBsc = structuredClone(outRaw); outBsc.memo += ':374259521';
+const inBsc = structuredClone(inRaw); inBsc.memo += ':1763014';
 const USDT = thor.STABLES.find((s) => s.chain === 'BSC');
 const USDC = thor.STABLES.find((s) => s.chain === 'BASE');
 const DEAD = '0x000000000000000000000000000000000000dEaD';
@@ -51,8 +56,16 @@ t('live OUT BCH->BSC.USDT parses', () => {
 });
 t('live IN BSC.USDT->BCH parses, router active', () => {
   const r = thor.parseQuote(inBsc, inReq, vaults, NOW);
-  return r.ok && r.q.expectedOut === 1817540n && r.q.router === inBsc.router && r.q.memo === `=:c:${BCHQ}`;
+  return r.ok && r.q.expectedOut === 1817540n && r.q.router === inBsc.router && r.q.memo === `=:c:${BCHQ}:1763014`;
 });
+t('rule 14: 16.11 OUT memo with no price limit -> invalid', () => { const r = thor.parseQuote(outRaw, outReq, vaults, NOW); return !r.ok && r.kind === 'invalid' && /no price limit/.test(r.error); });
+t('rule 14: 16.11 IN memo with no price limit -> invalid', () => { const r = thor.parseQuote(inRaw, inReq, vaults, NOW); return !r.ok && /no price limit/.test(r.error); });
+t('rule 14: streaming form "<limit>/1/0" is a limit; "0" is not', () => {
+  const a = thor.parseQuote(tweak(outRaw, (q) => { q.memo += ':374259521/1/0'; }), outReq, vaults, NOW);
+  const b = thor.parseQuote(tweak(outRaw, (q) => { q.memo += ':0/1/0'; }), outReq, vaults, NOW);
+  return a.ok && !b.ok;
+});
+t('rule 14: the live 20.11 OUT memo with a limit fits 80 B', () => new TextEncoder().encode('=:BSC.USDT:0x435afaC555fe115f18e657E49960063c12C6AEd0:360190963').length === 63);
 t('live Base halt error -> kind halted', () => { const r = thor.parseQuote(fx('out_base'), { ...outReq, to: USDC.asset }, vaults, NOW); return !r.ok && r.kind === 'halted'; });
 t('live dust error -> kind minimum', () => { const r = thor.parseQuote(fx('err_small'), { ...outReq, amountIn: 1000n }, vaults, NOW); return !r.ok && r.kind === 'minimum'; });
 t('live prefixed-address error -> kind refused, message kept', () => { const r = thor.parseQuote(fx('err_prefix'), inReq, vaults, NOW); return !r.ok && r.kind === 'refused' && /bitcoincash/.test(r.error); });

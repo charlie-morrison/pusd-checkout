@@ -129,6 +129,9 @@ export function parseQuote(raw: unknown, req: SwapRequest, vaults: Vaults, nowSe
     ? (parts[2] ?? '').toLowerCase() === req.destination.toLowerCase()
     : parts[2] === req.destination;
   if (parts[0] !== '=' || !assetOk || !destOk) return bad('The THORChain memo does not pay the asset and address you asked for.');
+  // Rule 14: the memo must carry a price limit (parts[3], "<limit>" or "<limit>/<interval>/<quantity>").
+  const limit = (parts[3] ?? '').split('/')[0];
+  if (!/^[1-9]\d*(e\d+)?$/.test(limit)) return bad('The THORChain memo has no price limit, so the swap could fill at any price.');
 
   const fromChain = chainOf(req.from);
   if (fromChain === 'BCH' && new TextEncoder().encode(memo).length > OP_RETURN_MAX) return bad('The THORChain memo is too long for a BCH OP_RETURN.');
@@ -180,12 +183,20 @@ export async function readThorState(): Promise<ThorState> {
   return { inbound: inbound as InboundEntry[], vaults: activeVaults(asgard as AsgardVault[]), readAt: Math.floor(Date.now() / 1000) };
 }
 
+export const LIQUIDITY_TOLERANCE_BPS = 300;
+
 export async function quoteSwap(req: SwapRequest, state: ThorState): Promise<QuoteResult> {
   for (const chain of [chainOf(req.from), chainOf(req.to)]) {
     const s = chainStatus(state.inbound, chain);
     if (!s.open) return { ok: false, kind: 'halted', error: s.reason as string };
   }
-  const qs = new URLSearchParams({ from_asset: req.from, to_asset: req.to, amount: req.amountIn.toString(), destination: req.destination });
+  // Rule 14 (20.11): without a tolerance THORChain's quote memo carries NO price limit
+  // ("=:BSC.USDT:0x…"), so a swap that waits ~10 min for a BCH confirmation fills at whatever price is
+  // left. liquidity_tolerance_bps puts a limit in the memo ("…:<min out>", 63 B for BSC, under the 80 B
+  // OP_RETURN cap); below it THORChain refunds instead of filling. (`tolerance_bps` is a different knob:
+  // it counts fees too and refused a normal 4 USD quote outright.)
+  const qs = new URLSearchParams({ from_asset: req.from, to_asset: req.to, amount: req.amountIn.toString(), destination: req.destination,
+    liquidity_tolerance_bps: String(LIQUIDITY_TOLERANCE_BPS) });
   const raw = await thorGet(`/quote/swap?${qs.toString()}`);
   return parseQuote(raw, req, state.vaults, Math.floor(Date.now() / 1000));
 }
