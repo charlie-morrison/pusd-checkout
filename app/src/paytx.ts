@@ -135,7 +135,7 @@ function buildPaymentUnsafe(p: PayParams): PayTx | string {
 
 // Build rule 4: the wallet may only add signatures. Same version, locktime, outpoints and sequences, the
 // outputs byte for byte, and the pool's unlock untouched; only the buyer inputs' unlocks may change.
-export function checkSigned(req: PayTx, signedHex: string): string | null {
+export function checkSigned(req: PayTx, signedHex: string, opts: { poolInput: boolean } = { poolInput: true }): string | null {
   let s: Transaction;
   try {
     const d = decodeTransaction(hexToBin(signedHex));
@@ -151,7 +151,8 @@ export function checkSigned(req: PayTx, signedHex: string): string | null {
       || a.sequenceNumber !== b.sequenceNumber) return `The wallet changed input ${i}.`;
     if (b.unlockingBytecode.length === 0) return `Input ${i} is not signed.`;
   }
-  if (binToHex(s.inputs[0].unlockingBytecode) !== binToHex(r.inputs[0].unlockingBytecode)) return 'The wallet changed the pool input.';
+  // The bridge's vault send (bridgetx.ts) has no pool: there input 0 is the wallet's own and gets signed.
+  if (opts.poolInput && binToHex(s.inputs[0].unlockingBytecode) !== binToHex(r.inputs[0].unlockingBytecode)) return 'The wallet changed the pool input.';
   if (binToHex(encodeTransactionOutputs(s.outputs)) !== binToHex(encodeTransactionOutputs(r.outputs))) return 'The wallet changed the outputs.';
   return null;
 }

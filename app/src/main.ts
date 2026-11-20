@@ -9,8 +9,10 @@ import { parsePayRequest, bestQuote, freshQuote, payLink, checkMerchantAddress, 
   type PayRequest, type Quote } from './quote';
 import { buildPayment, checkSigned, wcRequest, txidOf, poolAddress, livePoolsOf, MERCHANT_DUST, type PayTx } from './paytx';
 import { ElectrumNetworkProvider, Network } from 'cashscript';
-import { STABLES, readThorState, chainStatus, thorUnits, formatThor, type ThorState, type QuoteResult } from './thor';
-import { quoteOut, quoteIn, bchDestination, evmDestination } from './bridge';
+import { STABLES, readThorState, chainStatus, thorUnits, formatThor, quoteSwap, BCH_ASSET, THOR_API, type ThorState, type QuoteResult } from './thor';
+import { quoteOut, quoteIn, bchDestination, evmDestination, bestSell } from './bridge';
+import { buildSell, buildVaultSend, vaultSendBytes, type TokenCoin, type SellTx } from './bridgetx';
+import { encodeCashAddress, decodeCashAddress } from '@bitauth/libauth';
 
 const net = netFromUrl(location.search);
 const prefix = net.name === 'chipnet' ? 'bchtest' : 'bitcoincash';
@@ -18,7 +20,9 @@ const prefix = net.name === 'chipnet' ? 'bchtest' : 'bitcoincash';
 // Shared between the payment card and the wallet card: the buyer's spendable coins (with their wallet
 // paths, build rule 8), an unused change address, and the BCH the current quote needs. Either side
 // redraws the "enough?" line and the Pay button when its half changes.
-let funds: { sats: bigint; coins: FoundUtxo[]; changeAddress: string } | null = null;
+// `tokens` and `changePath` serve the bridge: the seller's PUSD coins, and the wallet path of the address the
+// sale's BCH lands on (the vault send spends it, so the wallet must know where to sign).
+let funds: { sats: bigint; coins: FoundUtxo[]; changeAddress: string; changePath: ['receive' | 'change', number]; tokens: FoundUtxo[] } | null = null;
 let walletLink: WalletLink | null = null;
 let needSats: bigint | null = null;
 const fundsListeners: (() => void)[] = [];
@@ -155,7 +159,8 @@ function renderWallet(root: HTMLElement) {
     // that did not share its change chain gets it on its first unused receive address.
     const chain = r.chains.change.stopped === 'no-xpub' ? 'receive' : 'change';
     const pub = link.pubkeyAt(chain === 'change' ? 1 : 0, BigInt(r.chains[chain].lastUsed + 1));
-    funds = pub ? { sats: r.spendableSats, coins: r.spendable, changeAddress: addressOf(pub, prefix) } : null;
+    funds = pub ? { sats: r.spendableSats, coins: r.spendable, changeAddress: addressOf(pub, prefix),
+      changePath: [chain, r.chains[chain].lastUsed + 1], tokens: r.utxos.filter((u) => !!u.token) } : null;
     fundsChanged();
     box.dataset.state = 'done';
     box.dataset.sats = String(r.spendableSats);
@@ -443,7 +448,8 @@ function renderBridge(root: HTMLElement) {
   box.append(el('p', { class: 'small' },
     'Move dollars between Bitcoin Cash and another chain. Out: your PUSD is sold on a Cauldron pool and the BCH goes to ' +
     'THORChain, which pays USDT or USDC to your address on the other chain. In: the reverse, ending as PUSD in your BCH wallet. ' +
-    'This build shows the live quote for both directions; sending is not live yet.'));
+    'Both directions show a live quote. Out (PUSD → other chain) sends from your WizardConnect wallet in two ' +
+    'signatures: the Cauldron sale, then the BCH to THORChain with the memo. In is a quote and the exact router call.'));
   const status = el('p', { class: 'small muted', id: 'thor-status' }, 'Reading THORChain status…');
   box.append(status);
 
@@ -474,7 +480,8 @@ function renderBridge(root: HTMLElement) {
   const go = el('button', { type: 'submit', id: 'br-go' }, 'Get quote');
   form.append(go);
   const out = el('div', { id: 'bridge-quote' });
-  box.append(form, out);
+  const sendArea = el('div', { id: 'bridge-send', 'aria-live': 'polite' });
+  box.append(form, out, sendArea);
 
   const syncDir = () => {
     destLabel.textContent = rOut.checked ? 'Your address on the other chain (0x…)' : 'Your Bitcoin Cash address (the PUSD lands here)';
@@ -513,7 +520,7 @@ function renderBridge(root: HTMLElement) {
     const st = STABLES.find((x) => x.chain === sel.value)!;
     const units1e8 = thorUnits(amt.value.trim());
     const pusd = parseAmount(amt.value.trim(), net.token.decimals);
-    const fail = (msg: string, kind = 'error') => { if (mine !== run) return; box.dataset.state = kind; out.replaceChildren(el('p', { class: 'error' }, msg)); };
+    const fail = (msg: string, kind = 'error') => { if (mine !== run) return; box.dataset.state = kind; out.replaceChildren(el('p', { class: 'error' }, msg)); armSend(null); };
     if (units1e8 === null || typeof pusd === 'string') return fail('Enter an amount in dollars, at most 2 decimals.');
     if (units1e8 > BigInt(BRIDGE_MAX_USD) * 100000000n) return fail(`The amount is above the demo limit of ${BRIDGE_MAX_USD}.`);
     try {
@@ -543,7 +550,9 @@ function renderBridge(root: HTMLElement) {
         row('THORChain minimum', `${formatThor(q.minIn, 8)} BCH into the vault`);
         row('Time', `about ${Math.round(q.seconds / 60)} min (THORChain waits for a BCH confirmation)`);
         row('Vault', `${q.inboundAddress} (an active THORChain vault; the memo pays your address)`);
+        armSend({ pusd, st, to, display: amt.value.trim() });
       } else {
+        armSend(null);
         const d = bchDestination(dest.value);
         if (typeof d === 'string') return fail(d);
         const r = await quoteIn(pools, units1e8, st, d.thor, state);
@@ -587,6 +596,144 @@ function renderBridge(root: HTMLElement) {
       fail(`Could not get a quote: ${String(e).slice(0, 160)}`);
     }
   }
+
+  // ---- OUT send: two signatures. A = sell the PUSD on one Cauldron pool (pool input 0, rule 4), B = send A's BCH to
+  // the THORChain vault with the memo (plain P2PKH spend, vault first, OP_RETURN; THORChain refunds to the sender).
+  // Each step re-reads what it depends on right before the wallet signs: the pool from the chain (rules 5, 10),
+  // THORChain's status, vault and memo from a fresh quote for the exact BCH amount. Nothing is sent unchecked.
+  type OutReq = { pusd: bigint; st: typeof STABLES[number]; to: string; display: string };
+  let armed: OutReq | null = null;
+  let sending = false;
+  // A went out, B did not (retry B only). The proceeds address/path are kept: a rescan moves funds.changeAddress on.
+  type Pending = { sell: SellTx; txid: string; req: OutReq; address: string; path: ['receive' | 'change', number] };
+  let pending: Pending | null = null;
+  const sayS = (state: string, cls: string, ...parts: (string | Node)[]) => {
+    box.dataset.send = state;
+    const p = el('p', { class: cls, id: 'bridge-send-msg' });
+    p.append(...parts);
+    msgBox.replaceChildren(p);
+  };
+  const ctrl = el('div', { id: 'bridge-send-ctrl' });
+  const msgBox = el('div', { id: 'bridge-send-result' });
+  const sendBtn = el('button', { type: 'button', id: 'br-send', hidden: '' }, 'Send') as HTMLButtonElement;
+  const retryBtn = el('button', { type: 'button', id: 'br-send-b', hidden: '' }, 'Send the BCH to THORChain') as HTMLButtonElement;
+  const note = el('p', { class: 'small', id: 'bridge-send-note' });
+  ctrl.append(note, sendBtn, retryBtn);
+  sendArea.append(ctrl, msgBox);
+  const pusdCoins = (): TokenCoin[] => (funds?.tokens ?? []).filter((u) => (u.token as { category?: string } | undefined)?.category === net.token.category) as TokenCoin[];
+  const pusdHeld = () => pusdCoins().reduce((s2, c) => s2 + c.token.amount, 0n);
+  const drawSend = () => {
+    if (sending) return;
+    retryBtn.hidden = !pending;
+    if (pending) { sendBtn.hidden = true; note.textContent = 'Step 1 is on chain; step 2 (BCH to THORChain) has not gone out yet.'; return; }
+    if (!armed) { sendBtn.hidden = true; note.textContent = ''; return; }
+    sendBtn.hidden = false;
+    sendBtn.textContent = `Send ${armed.display} PUSD → ${armed.st.symbol} on ${armed.st.chain}`;
+    const ready = !!funds && walletLink?.state.kind === 'connected';
+    const held = pusdHeld();
+    if (!ready) { sendBtn.disabled = true; note.className = 'small muted'; note.textContent = 'Connect a wallet below to send from it.'; return; }
+    if (held < armed.pusd) { sendBtn.disabled = true; note.className = 'small error'; note.textContent = `This wallet holds ${formatUnits(held, net.token.decimals)} PUSD, less than ${armed.display}.`; return; }
+    sendBtn.disabled = false; note.className = 'small ok'; note.textContent = `Your wallet holds ${formatUnits(held, net.token.decimals)} PUSD. Two signatures: the sale, then the send to THORChain.`;
+  };
+  fundsListeners.push(drawSend);
+  function armSend(r: OutReq | null) { if (!sending) { armed = r; drawSend(); } }
+
+  const tokenAddressOf = (a: string) => {
+    const d = decodeCashAddress(a);
+    return typeof d === 'string' ? a : encodeCashAddress({ prefix: d.prefix as 'bitcoincash', type: 'p2pkhWithTokens', payload: d.payload }).address;
+  };
+  const mkProvider = () => new ElectrumNetworkProvider(Network.MAINNET, { manualConnectionManagement: true });
+
+  async function signCheckSend(tx: PayTx, poolInput: boolean): Promise<string> {
+    const dm = walletLink?.manager;
+    if (!dm) throw new Error('The wallet is not connected.');
+    let resp;
+    try { resp = await dm.signTransaction({ transaction: wcRequest(tx) as never, inputPaths: tx.inputPaths }); }
+    catch (e) { throw new Error(`The wallet did not sign: ${String((e as Error)?.message ?? e).slice(0, 160)}`); }
+    if (resp.error || !resp.signedTransaction) throw new Error(`The wallet did not sign: ${String(resp.error ?? 'no transaction returned').slice(0, 160)}`);
+    const bad = checkSigned(tx, resp.signedTransaction, { poolInput });
+    if (bad) throw new Error(`Not sent: ${bad} The page only sends the transaction you saw.`);
+    const txid = txidOf(resp.signedTransaction);
+    await sendChecked('mainnet', resp.signedTransaction, txid);
+    return txid;
+  }
+
+  async function stepB(p: Pending) {
+    sayS('b-quoting', 'muted small', 'Step 2: reading THORChain again and quoting the exact BCH amount…');
+    const stt = await readThorState();
+    const rate = chainStatus(stt.inbound, 'BCH').gasRate ?? 3n;
+    const amountIn = p.sell.proceeds - vaultSendBytes(80, false) * rate; // memo <= 80 B; a shorter one leaves a few sat to the fee
+    const r = await quoteSwap({ from: BCH_ASSET, to: p.req.st.asset, amountIn, destination: p.req.to }, stt);
+    if (!r.ok) throw new Error(`THORChain will not take it right now: ${r.error} Your BCH stays in your wallet; press "Send the BCH to THORChain" to try again.`);
+    if (r.q.dust && amountIn <= r.q.dust) throw new Error('The amount is below THORChain’s dust threshold.');
+    const lockB = p.sell.proceedsLock;
+    const tx = buildVaultSend({ coin: { txid: p.txid, vout: p.sell.proceedsVout, satoshis: p.sell.proceeds, lockingBytecode: lockB, path: p.path },
+      vault: r.q.inboundAddress, memo: r.q.memo, amount: amountIn, changeAddress: p.address, feePerByte: rate,
+      provider: mkProvider(), label: `about ${formatThor(r.q.expectedOut)} ${p.req.st.symbol} on ${p.req.st.chain}` });
+    if (typeof tx === 'string') throw new Error(tx);
+    box.dataset.vaultAmount = String(amountIn);
+    sayS('b-signing', 'small', 'Step 2 of 2: your wallet is asking you to sign ', el('strong', {}, tx.userPrompt),
+      `. THORChain should pay about ${formatThor(r.q.expectedOut)} ${p.req.st.symbol} to ${p.req.to}.`);
+    const txidB = await signCheckSend(tx, false);
+    box.dataset.txidB = txidB;
+    const aA = el('a', { href: net.explorerTx(p.txid), target: '_blank', rel: 'noopener', id: 'br-txid-a' }, `${p.txid.slice(0, 12)}…`);
+    const aB = el('a', { href: net.explorerTx(txidB), target: '_blank', rel: 'noopener', id: 'br-txid-b' }, `${txidB.slice(0, 12)}…`);
+    const tr = el('a', { href: `${THOR_API}/tx/status/${txidB}`, target: '_blank', rel: 'noopener', id: 'br-thor-status' }, 'THORChain status');
+    pending = null;
+    sayS('sent', 'ok', 'Sent. Sale ', aA, ', THORChain deposit ', aB, `. THORChain pays out after a BCH confirmation (about ${Math.max(1, Math.round(r.q.seconds / 60))} min): `, tr, '.');
+  }
+
+  async function sendOut(retryOnly: boolean) {
+    if (sending) return;
+    const req = retryOnly ? pending?.req : armed;
+    if (!req || !funds || walletLink?.state.kind !== 'connected') return;
+    sending = true; sendBtn.disabled = true; retryBtn.disabled = true;
+    try {
+      if (!retryOnly) {
+        sayS('a-preparing', 'muted small', 'Step 1: checking THORChain and the pool on the chain before your wallet signs…');
+        const stt = await readThorState();
+        for (const c of ['BCH', req.st.chain]) {
+          const cs2 = chainStatus(stt.inbound, c);
+          if (!cs2.open) throw new Error(`${cs2.reason} Nothing was sold.`);
+        }
+        const provider = mkProvider();
+        let pools = await fetchPools(net.indexer, net.token.category);
+        let best = bestSell(pools, req.pusd);
+        if (best) { // rule 5/10: the pool from the chain, not the lagging indexer
+          const read = livePoolsOf(best.pool, await utxosAt('mainnet', poolAddress(best.pool, provider)));
+          pools = [...pools.filter((p2) => p2.owner_pkh !== best!.pool.owner_pkh), ...read];
+          best = bestSell(pools, req.pusd);
+        }
+        if (!best) throw new Error('No PUSD pool can buy that amount right now. Nothing was sold.');
+        const coins = pusdCoins();
+        const sell = buildSell({ pool: best.pool, units: req.pusd, tokenCoins: coins, proceedsAddress: funds.changeAddress,
+          proceedsPath: funds.changePath, tokenChangeAddress: tokenAddressOf(coins[0]?.address ?? funds.changeAddress), provider, label: `${req.display} PUSD` });
+        if (typeof sell === 'string') throw new Error(sell);
+        // Do not sell if THORChain would refuse what the sale yields (below its minimum, halted): quote it first.
+        const pre = await quoteSwap({ from: BCH_ASSET, to: req.st.asset, amountIn: sell.proceeds - vaultSendBytes(80, false) * (chainStatus(stt.inbound, 'BCH').gasRate ?? 3n), destination: req.to }, stt);
+        if (!pre.ok) throw new Error(`THORChain would not take the BCH from this sale: ${pre.error} Nothing was sold.`);
+        box.dataset.poolOutpoint = `${best.pool.txid}:${best.pool.tx_pos}`;
+        sayS('a-signing', 'small', 'Step 1 of 2: your wallet is asking you to sign ', el('strong', {}, sell.userPrompt), '.');
+        let txidA: string;
+        try { txidA = await signCheckSend(sell, true); }
+        catch (e) {
+          const m = String((e as Error)?.message ?? e);
+          throw new Error(/missing|inputs|conflict|spent|mempool/i.test(m)
+            ? `Another trade used the pool before the sale reached the network, so nothing was sold. Press Send to try again. (${m.slice(0, 100)})` : m);
+        }
+        box.dataset.txidA = txidA;
+        pending = { sell, txid: txidA, req, address: funds.changeAddress, path: funds.changePath };
+      }
+      await stepB(pending!);
+      rescan();
+    } catch (e) {
+      sayS(pending ? 'b-error' : 'a-error', 'error', String((e as Error)?.message ?? e).slice(0, 300));
+    } finally {
+      sending = false; sendBtn.disabled = false; retryBtn.disabled = false; drawSend();
+    }
+  }
+  sendBtn.addEventListener('click', () => void sendOut(false));
+  retryBtn.addEventListener('click', () => void sendOut(true));
   form.addEventListener('submit', (ev) => { ev.preventDefault(); void quote(); });
   void loadState();
 }
