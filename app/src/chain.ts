@@ -6,6 +6,27 @@ import { ElectrumNetworkProvider, Network } from 'cashscript';
 import { cashAddressToLockingBytecode, sha256, binToHex } from '@bitauth/libauth';
 import type { ChainReader, ChainUtxo } from './utxos';
 
+// Measured 20.11 on mainnet: the page's coin scan failed twice in a row on the default server
+// (bch.imaginary.cash: "Connection lost", then "Failed to connect") and passed on the third press, while
+// three other Fulcrum servers answered from the host. So every connection tries the next server on failure.
+export const HOSTS: Record<'mainnet' | 'chipnet', (string | undefined)[]> = {
+  mainnet: [undefined, 'electrum.imaginary.cash', 'bch.loping.net', 'fulcrum.greyh.at'], // undefined = cashscript default
+  chipnet: [undefined],
+};
+
+export async function connectAny(net: 'mainnet' | 'chipnet'): Promise<ElectrumNetworkProvider> {
+  let last: unknown = null;
+  for (const hostname of HOSTS[net]) {
+    const p = new ElectrumNetworkProvider(net === 'chipnet' ? Network.CHIPNET : Network.MAINNET,
+      { manualConnectionManagement: true, ...(hostname ? { hostname } : {}) });
+    try {
+      await Promise.race([p.connect(), new Promise((_, r) => setTimeout(() => r(new Error('no answer in 10 s')), 10000))]);
+      return p;
+    } catch (e) { last = e; await p.disconnect().catch(() => undefined); }
+  }
+  throw new Error(`no Bitcoin Cash server answered (last: ${String((last as Error)?.message ?? last).slice(0, 80)})`);
+}
+
 function scripthashOf(address: string): string {
   const r = cashAddressToLockingBytecode(address);
   if (typeof r === 'string') throw new Error(`bad address ${address}: ${r}`);
@@ -15,9 +36,7 @@ function scripthashOf(address: string): string {
 // Unspent outputs of an address as a Fulcrum node sees them now (mempool included): the chain-side check
 // of a pool before signing (build rule 5), because the pool indexer can lag behind the chain.
 export async function utxosAt(net: 'mainnet' | 'chipnet', address: string) {
-  const provider = new ElectrumNetworkProvider(net === 'chipnet' ? Network.CHIPNET : Network.MAINNET,
-    { manualConnectionManagement: true });
-  await provider.connect();
+  const provider = await connectAny(net);
   try { return await provider.getUtxos(address); } finally { await provider.disconnect().catch(() => undefined); }
 }
 
@@ -25,9 +44,7 @@ export async function utxosAt(net: 'mainnet' | 'chipnet', address: string) {
 // refuses it but already knows the same txid (the wallet sent it too, or a retry), that counts as sent.
 export async function sendChecked(net: 'mainnet' | 'chipnet', hex: string, txid: string):
     Promise<{ txid: string; how: 'sent' | 'already-known' }> {
-  const provider = new ElectrumNetworkProvider(net === 'chipnet' ? Network.CHIPNET : Network.MAINNET,
-    { manualConnectionManagement: true });
-  await provider.connect();
+  const provider = await connectAny(net);
   try {
     try {
       const got = await provider.sendRawTransaction(hex);
@@ -45,9 +62,7 @@ export async function sendChecked(net: 'mainnet' | 'chipnet', hex: string, txid:
 
 export async function withElectrum<T>(net: 'mainnet' | 'chipnet',
                                       run: (reader: ChainReader) => Promise<T>): Promise<T> {
-  const provider = new ElectrumNetworkProvider(net === 'chipnet' ? Network.CHIPNET : Network.MAINNET,
-    { manualConnectionManagement: true });
-  await provider.connect();
+  const provider = await connectAny(net);
   const reader: ChainReader = {
     async history(address) {
       const h = await provider.performRequest('blockchain.scripthash.get_history', scripthashOf(address));

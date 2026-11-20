@@ -603,6 +603,7 @@ function renderBridge(root: HTMLElement) {
   // THORChain's status, vault and memo from a fresh quote for the exact BCH amount. Nothing is sent unchecked.
   type OutReq = { pusd: bigint; st: typeof STABLES[number]; to: string; display: string };
   let armed: OutReq | null = null;
+  let sentFor: OutReq | null = null;
   let sending = false;
   // A went out, B did not (retry B only). The proceeds address/path are kept: a rescan moves funds.changeAddress on.
   type Pending = { sell: SellTx; txid: string; req: OutReq; address: string; path: ['receive' | 'change', number] };
@@ -626,6 +627,9 @@ function renderBridge(root: HTMLElement) {
     if (sending) return;
     retryBtn.hidden = !pending;
     if (pending) { sendBtn.hidden = true; note.textContent = 'Step 1 is on chain; step 2 (BCH to THORChain) has not gone out yet.'; return; }
+    // After "Sent" the rescan shows 0 PUSD left; a red "not enough" above "Sent" reads as a failure (same as 17.11
+    // on the payment card). Stay quiet until the next quote asks for a new send.
+    if (box.dataset.send === 'sent' && armed === sentFor) { sendBtn.hidden = true; note.textContent = ''; return; }
     if (!armed) { sendBtn.hidden = true; note.textContent = ''; return; }
     sendBtn.hidden = false;
     sendBtn.textContent = `Send ${armed.display} PUSD → ${armed.st.symbol} on ${armed.st.chain}`;
@@ -636,7 +640,9 @@ function renderBridge(root: HTMLElement) {
     sendBtn.disabled = false; note.className = 'small ok'; note.textContent = `Your wallet holds ${formatUnits(held, net.token.decimals)} PUSD. Two signatures: the sale, then the send to THORChain.`;
   };
   fundsListeners.push(drawSend);
-  function armSend(r: OutReq | null) { if (!sending) { armed = r; drawSend(); } }
+  // A 30 s requote re-arms with an equal request; that must not bring the button back after "Sent".
+  const same = (a: OutReq | null, b: OutReq | null) => !!a && !!b && a.pusd === b.pusd && a.st.chain === b.st.chain && a.to === b.to;
+  function armSend(r: OutReq | null) { if (!sending) { armed = same(r, sentFor) ? sentFor : r; drawSend(); } }
 
   const tokenAddressOf = (a: string) => {
     const d = decodeCashAddress(a);
@@ -680,6 +686,7 @@ function renderBridge(root: HTMLElement) {
     const aB = el('a', { href: net.explorerTx(txidB), target: '_blank', rel: 'noopener', id: 'br-txid-b' }, `${txidB.slice(0, 12)}…`);
     const tr = el('a', { href: `${THOR_API}/tx/status/${txidB}`, target: '_blank', rel: 'noopener', id: 'br-thor-status' }, 'THORChain status');
     pending = null;
+    sentFor = p.req;
     sayS('sent', 'ok', 'Sent. Sale ', aA, ', THORChain deposit ', aB, `. THORChain pays out after a BCH confirmation (about ${Math.max(1, Math.round(r.q.seconds / 60))} min): `, tr, '.');
   }
 
