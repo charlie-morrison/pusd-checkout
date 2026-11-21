@@ -548,7 +548,7 @@ function renderBridge(root: HTMLElement) {
         row('4. THORChain fees', `${formatThor(q.fees.total)} ${st.symbol} in total (${q.fees.totalBps} bps; liquidity ${formatThor(q.fees.liquidity)}, outbound ${formatThor(q.fees.outbound)}, slippage ${q.fees.slippageBps} bps)`);
         row('End-to-end cost', `${cost.toFixed(2)}%`, 'bridge-cost');
         row('THORChain minimum', `${formatThor(q.minIn, 8)} BCH into the vault`);
-        row('Time', `about ${Math.round(q.seconds / 60)} min (THORChain waits for a BCH confirmation)`);
+        row('Time', `about ${Math.round(q.seconds / 60)} min by THORChain's estimate (it waits for a BCH block; our mainnet test on 20.11 took 41 min)`);
         row('Vault', `${q.inboundAddress} (an active THORChain vault; the memo pays your address)`);
         armSend({ pusd, st, to, display: amt.value.trim() });
       } else {
@@ -687,7 +687,7 @@ function renderBridge(root: HTMLElement) {
     const tr = el('a', { href: `${THOR_API}/tx/status/${txidB}`, target: '_blank', rel: 'noopener', id: 'br-thor-status' }, 'THORChain status');
     pending = null;
     sentFor = p.req;
-    sayS('sent', 'ok', 'Sent. Sale ', aA, ', THORChain deposit ', aB, `. THORChain pays out after a BCH confirmation (about ${Math.max(1, Math.round(r.q.seconds / 60))} min): `, tr, '.');
+    sayS('sent', 'ok', 'Sent. Sale ', aA, ', THORChain deposit ', aB, `. THORChain pays out after a BCH block (estimate about ${Math.max(1, Math.round(r.q.seconds / 60))} min; our mainnet test took 41 min): `, tr, '.');
   }
 
   async function sendOut(retryOnly: boolean) {
