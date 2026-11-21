@@ -16,6 +16,14 @@ from urllib.parse import urlencode
 from playwright.sync_api import sync_playwright
 
 base = sys.argv[1]
+
+
+def limited(memo, head):
+    """memo == head + ':' + a positive integer limit (rule 14)."""
+    if not isinstance(memo, str) or not memo.startswith(head + ":"):
+        return False
+    lim = memo[len(head) + 1:]
+    return lim.isdigit() and int(lim) > 0
 chromium = (sys.argv[sys.argv.index("--chromium") + 1] if "--chromium" in sys.argv else
             shutil.which("chromium") or shutil.which("chromium-browser"))
 THOR = "https://gateway.liquify.com/chain/thorchain_api/thorchain"
@@ -70,14 +78,15 @@ try:
         res["STATUS"] = {"pass": got == want, "page": line, "thorchain": want}
 
         d = quote(page, "out", "BSC", "5", DEAD)
-        ok = d.get("state") == "quoted" and d.get("memo") == f"=:BSC.USDT:{DEAD}"
+        # rule 14 (20.11): the memo carries a price limit, "=:BSC.USDT:<addr>:<min out>"; a memo without one is a FAIL
+        ok = d.get("state") == "quoted" and limited(d.get("memo"), f"=:BSC.USDT:{DEAD}")
         ind = get(f"{THOR}/quote/swap?" + urlencode({"from_asset": "BCH.BCH", "to_asset": USDT, "amount": d.get("amountIn", "0"), "destination": DEAD}))
         ok = ok and close(int(d.get("expectedOut", 0)), int(ind.get("expected_amount_out", 0)))
         res["OUT"] = {"pass": ok, "page_out": d.get("expectedOut"), "independent_out": ind.get("expected_amount_out"), "amount_in_sats": d.get("amountIn"), "memo": d.get("memo"), "text": d.get("text", "")[:900]}
         page.screenshot(path="/tmp/exp2_thor/bridge-out.png", full_page=True)
 
         d = quote(page, "in", "BSC", "5", PRIZE_Z)
-        ok = d.get("state") == "quoted" and d.get("memo") == f"=:c:{PRIZE_Q_BARE}" and d.get("amountIn") == "500000000"
+        ok = d.get("state") == "quoted" and limited(d.get("memo"), f"=:c:{PRIZE_Q_BARE}") and d.get("amountIn") == "500000000"
         ind = get(f"{THOR}/quote/swap?" + urlencode({"from_asset": USDT, "to_asset": "BCH.BCH", "amount": "500000000", "destination": PRIZE_Q_BARE}))
         ok = ok and close(int(d.get("expectedOut", 0)), int(ind.get("expected_amount_out", 0)))
         res["IN"] = {"pass": ok, "page_out": d.get("expectedOut"), "independent_out": ind.get("expected_amount_out"), "memo": d.get("memo"), "text": d.get("text", "")[:900]}
