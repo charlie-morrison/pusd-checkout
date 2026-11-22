@@ -203,6 +203,12 @@ All keys in these scripts are generated per run and thrown away. Nothing here ho
     80 bytes, change to another address, a chipnet or script vault, and an amount the coin cannot carry.
   - The coin scan failed twice on the default Fulcrum server and worked on the third press, so every connection now
     falls back to three other servers.
+- 22.11: Paytaca through the published page. The Paytaca browser extension (0.27.5, built from the same code as the
+  phone app) paired over WizardConnect, signed the page's request, and the page checked and sent it on chipnet: 15 TEST
+  to the merchant in
+  [a1329b46…](https://chipnet.imaginary.cash/tx/a1329b4698561a1927774e15956841fb5c8f6936cbf0b28ab24305f01ca707cd).
+  The faucet coin sat on Paytaca's receive/1, not receive/0, and the page's address scan found it. Paytaca showed the
+  cost line the page puts in the request ("Pay 3,154 sat … for 15 TEST") and listed the same pool, inputs and outputs.
 
 Build: Node 24, `npm ci --ignore-scripts`, `npm run build` (output in `dist/`), `npm run dev` for a local server.
 
