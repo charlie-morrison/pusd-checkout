@@ -3,7 +3,7 @@
 // Exit 0 = all pass, 1 = a case failed.
 import { pathToFileURL } from 'node:url';
 import * as la from '@bitauth/libauth';
-import { computeOptimalBuy } from '@mr-zwets/cauldron-swap-sdk';
+import { calcBuyFromPool, computeOptimalBuy } from '@mr-zwets/cauldron-swap-sdk';
 
 const target = process.argv[2] ?? new URL('../app/src/quote.ts', import.meta.url).pathname;
 const q = await import(pathToFileURL(target).href);
@@ -38,19 +38,36 @@ t('payLink keeps net and sets to/usd/memo', () => {
   return l.searchParams.get('net') === 'chipnet' && l.searchParams.get('to') === CHIP_Z && l.searchParams.get('usd') === '40' && l.searchParams.get('memo') === 'hi';
 });
 
-// Live: our single-pool pick must cost exactly what the SDK's own optimiser costs when limited to one pool.
+// Our single-pool pick must be the cheapest pool by brute force (each pool priced on its own with the SDK's
+// calcBuyFromPool), and never dearer than the SDK's optimiser capped at one pool. Not "equal to the SDK":
+// computeOptimalBuy(maxPools 1) splits the buy across all pools, keeps the pool with the largest share and
+// re-solves, which is a heuristic. Measured 22.11: on 20,000 random pool sets ours was cheaper 298 times and
+// never dearer; the old equality check failed on live pools on 18.11 ($12.5) and 21.11 ($1) for this reason.
+const bruteMin = (pools, units) => pools.filter((p) => BigInt(p.tokens) > units)
+  .reduce((m, p) => { const c = calcBuyFromPool(q.toSdkPool(p), units).supplyAmount; return m === null || c < m ? c : m; }, null);
+const checkPick = (pools, units, label) => {
+  const ours = q.bestQuote(pools, units);
+  const sdk = computeOptimalBuy(pools.map(q.toSdkPool), units, 1n, 1);
+  const sdkCost = sdk.reduce((a, x) => a + x.supplyAmount, 0n);
+  const min = bruteMin(pools, units);
+  console.log(`   ${label}: ours ${ours?.poolSats} sat (pool ${ours?.pool.txid.slice(0, 8)}, lp fee ${ours?.lpFeeSats}) / brute min ${min} / sdk(1 pool) ${sdkCost} (${sdk[0]?.pool.txid.slice(0, 8)}) / ${pools.length} pools`);
+  return { ok: !!ours && ours.poolSats === min && ours.poolSats <= sdkCost, ours, sdkCost };
+};
+
+// Fixture found by the 22.11 search (4 synthetic pools, 552 units): the SDK's one-pool pick costs 3,399 sat
+// more than the cheapest pool, which is p2.
+const fx = (id, sats, tokens) => ({ pool_id: id, txid: id.slice(1).repeat(64), tx_pos: 0, sats, tokens, token_id: PUSD });
+const FIXTURE = [fx('p0', 125797302, 27282), fx('p1', 112346232, 23622), fx('p2', 863339268, 184238), fx('p3', 25918508, 5719)];
+t('fixture 22.11: cheapest pool by brute force, cheaper than SDK computeOptimalBuy(maxPools 1)', () => {
+  const r = checkPick(FIXTURE, 552n, 'fixture 552 units');
+  return r.ok && r.ours.pool.pool_id === 'p2' && r.ours.poolSats === 2602253n && r.sdkCost === 2605652n;
+});
+
 const res = await fetch(`https://indexer.cauldron.quest/cauldron/pool/active?token=${PUSD}`);
 const live = (await res.json()).active.filter((p) => p.token_id === PUSD);
 for (const usd of [1, 12.5, 100]) {
-  t(`live mainnet $${usd}: cheapest single pool == SDK computeOptimalBuy(maxPools 1)`, () => {
-    const units = BigInt(Math.round(usd * 100));
-    const ours = q.bestQuote(live, units);
-    const sdk = computeOptimalBuy(live, units, 1n, 1);
-    const sdkCost = sdk.reduce((a, x) => a + x.supplyAmount, 0n);
-    const ok = ours && sdk.length === 1 && ours.poolSats === sdkCost && ours.pool.txid === sdk[0].pool.txid;
-    console.log(`   $${usd}: ours ${ours?.poolSats} sat (pool ${ours?.pool.txid.slice(0, 8)}, lp fee ${ours?.lpFeeSats}) / sdk ${sdkCost} (${sdk[0]?.pool.txid.slice(0, 8)}) / ${live.length} pools`);
-    return ok;
-  });
+  t(`live mainnet $${usd}: cheapest single pool by brute force, <= SDK computeOptimalBuy(maxPools 1)`, () =>
+    checkPick(live, BigInt(Math.round(usd * 100)), `$${usd}`).ok);
 }
 
 let failed = 0;
