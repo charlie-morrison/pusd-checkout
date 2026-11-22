@@ -92,9 +92,14 @@ All keys in these scripts are generated per run and thrown away. Nothing here ho
   can deliver exactly that amount, the 0.3% pool fee, and an estimated network fee. It refreshes every 30 seconds.
   Once a wallet is connected, the card says whether the wallet holds enough. Addresses that cannot receive tokens,
   addresses of the other network, and malformed amounts are rejected. (Paying went live on 17.11, see below.)
-  - `test/quote_unit.mjs`: 16 cases. The quote must equal the Cauldron SDK's own optimiser limited to one pool,
-    checked against live mainnet pools. Four broken copies fail it: one picks the priciest pool, one accepts any
-    address type, one skips the network check, one lets a pool sell its last token.
+  - `test/quote_unit.mjs`: 16 cases then, 18 now. The quote must equal the Cauldron SDK's own optimiser limited to
+    one pool, checked against live mainnet pools. Four broken copies fail it: one picks the priciest pool, one
+    accepts any address type, one skips the network check, one lets a pool sell its last token.
+  - Corrected 22.11: "equal to the SDK's optimiser" was the wrong check. With one pool allowed, the SDK splits the
+    buy across all pools, keeps the pool with the largest share and solves again, so its pick can cost more than
+    the cheapest pool. That made the test fail on live pools on 18.11 and 21.11 while the page quoted correctly.
+    Now the quote must be the cheapest pool by brute force and never cost more than the SDK's pick. On 20,000
+    random pool sets ours was cheaper 298 times and never dearer; one of those sets is now a fixed test case.
   - `test/pay_e2e.py`: the generator's link carries every field and keeps the network. The page's total matches an
     independent quote. The test wallet reads "enough" for 40 TEST and "short" for 900 TEST. A link to a non-token
     address is refused, and a mainnet link for 12.50 PUSD is quoted.
